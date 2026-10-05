@@ -1,0 +1,48 @@
+Xiaojiejie-Scraping for MoviePilot V3 (2026)
+Repository: https://github.com/zhimadelvdou/MoviePilot-Plugins
+
+Based on the architecture and Manko API contract of JAVRecognize 1.1:
+Copyright and original authorship: hyuan280 and upstream contributors.
+https://github.com/hyuan280/MoviePilot-Plugins/tree/main/plugins.v2/javrecognize
+Upstream license: GNU General Public License version 3 (GPL-3.0).
+
+provider.py uses the upstream Manko endpoint/response contract and a rewritten
+base91 decoder derived from that implementation. The V3 integration, strict
+identity validation, cache, safe metadata projection, and offline tests were
+rewritten for this repository. No upstream author's attribution is removed.
+
+MoviePilot SDK and test bootstrap are supplied separately by MoviePilot:
+https://github.com/jxxghp/MoviePilot
+Validation baseline: v3.1.1, 6ff7dd86a14c403b0e408f778aa3174e13e15ef1.
+The SDK is not bundled into this plugin repository.
+
+Additional independently implemented direct adapter schema references:
+- javinizer/javinizer-go (MIT): FANZA endpoint and Product JSON-LD field facts.
+  https://github.com/javinizer/javinizer-go
+- yyymess/avdc (GPLv3): MGStage product URL and table-label facts.
+  https://github.com/yyymess/avdc
+- stashapp/CommunityScrapers (AGPLv3): DUGA OpenGraph/mpn field facts only; no YAML copied.
+  https://github.com/stashapp/CommunityScrapers
+- hibikidesu/javscraper and libredmm/librefanza: SOD page element facts only;
+  no source implementation or session-handshake code copied.
+  https://github.com/hibikidesu/javscraper
+  https://github.com/libredmm/librefanza
+- Yuukiy/JavSP, Hazard804/mdcx, ShotHeadman/mdcz (GPLv3): JavBus/Jav321/FC2Hub
+  endpoint, selector, and permalink facts; no MetaTube implementation used.
+  https://github.com/Yuukiy/JavSP
+  https://github.com/Hazard804/mdcx
+  https://github.com/ShotHeadman/mdcz
+- GFriends official documented Filetree.json interface, no images bundled.
+  https://github.com/gfriends/gfriends/blob/master/README.md
+
+The additional adapter algorithms and synthetic fixtures were written here.
+Referenced projects' source code/assets are not redistributed with these adapters.
+
+FC2PPVDB/FC2CMADB current initial-page contract references:
+- z291173301/MDCx (GPL-3.0), commit 05ca8a8675cd40259823acc482309edee60501b4.
+  https://github.com/z291173301/MDCx/blob/05ca8a8675cd40259823acc482309edee60501b4/mdcx/crawlers/fc2ppvdb.py
+- peach-mitao/peach (AGPL-3.0), commit 489653d0edff03104c091a814679ca4b4ebdcc24,
+  observed schema and anonymous fixture facts only, no implementation copied.
+  https://github.com/peach-mitao/peach/blob/489653d0edff03104c091a814679ca4b4ebdcc24/tests/test_metadata_fc2.py
+The adapter and all of its synthetic fixtures were independently written; no
+authenticated/deferred actress flow, source assets, or images are bundled.

@@ -1,0 +1,16 @@
+{
+  "XiaojiejieScraping": {
+    "name": "Xiaojiejie-Scraping",
+    "description": "直连多来源刮削：原生手动入口、qBittorrent 标签/目录触发、预览与安全持久原生交接（离线验收版）",
+    "labels": "识别,刮削",
+    "version": "2.0.0",
+    "icon": "",
+    "author": "zhimadelvdou（基于 hyuan280 方案重写）",
+    "level": 1,
+    "v3": true,
+    "system_version": ">=3.1.1,<4",
+    "history": {
+      "v2.0.0": "V3 重写：独立直连来源、手动原生调用、qBittorrent 范围筛选、持久单文件原生交接与离线回归；默认不执行文件操作"
+    }
+  }
+}

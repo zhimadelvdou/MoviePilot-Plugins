@@ -1,2 +1,126 @@
-# MoviePilot-Plugins
-MoviePilot 插件开发与 V3 适配测试
+# Xiaojiejie-Scraping
+
+MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
+
+这是尚未实站/NAS 验收的开发版本。全部测试使用合成元数据和模拟执行边界；解析器测试通过不能证明网站当前可访问，也不能证明真实库整理已经验收。默认禁用，自动模式默认只读发现。
+
+## 功能与边界
+
+- 直连元数据：Manko、FANZA、MGStage、DUGA、SOD、JavBus、Jav321、FC2Hub、FC2PPVDB/FC2CMADB
+- 演员缩略图：可选 GFriends 官方公开索引，写入 NFO 的远程 thumb；插件不下载头像
+- 原生手动入口：注册来源列表及同步/异步搜索、识别、图片、NFO 方法，供 MoviePilot 手动整理和刮削调用
+- 自动入口：qBittorrent 已完成任务 + 精确专用标签 + MoviePilot 容器内路径白名单；不接管普通全局识别
+- 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
+- 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
+
+所有来源当前都是**离线适配、未实站验收**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾、歧义或分页无法证明完整性时，返回空结果。
+
+## 来源状态
+
+| 来源 | 已实现合同与限制 |
+| --- | --- |
+| Manko | 原公开 API/base91 合同；详情须能证明唯一番号；要求完整搜索总数 |
+| FANZA | 现代 `/av/content/` Product JSON-LD；不从 CID 猜番号，不支持未经验证的旧目录 |
+| MGStage | 原生产品 URL/品番详情；保留数字前缀；遇年龄门槛不设置确认 Cookie |
+| DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
+| SOD | 产品详情表；不执行年龄/会话握手 |
+| JavBus/Jav321 | 公开软件记录的详情身份与番号字段，严格核对来源原生 ID |
+| FC2Hub | `id{number}` permalink 及经搜索确认的当前详情路由；不猜新版 slug |
+| FC2PPVDB / FC2CMADB | 匿名普通 GET `/articles/{video_id}` 的初始 Inertia `Articles/Show` 合同；核对页面路径和 video_id，不把 article.id 当产品 ID；不请求有访问争议的延迟演员接口 |
+| GFriends | 官方 `Filetree.json`：演员名精确匹配、按质量顺序选图；只取公开索引 |
+
+FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当前 MDCx 合同](https://github.com/z291173301/MDCx/blob/05ca8a8675cd40259823acc482309edee60501b4/mdcx/crawlers/fc2ppvdb.py#L168-L196)及[独立匿名合成 fixture](https://github.com/peach-mitao/peach/blob/489653d0edff03104c091a814679ca4b4ebdcc24/tests/test_metadata_fc2.py#L115-L140)，已实现保守适配。这并不证明线上匿名访问始终可用，也不意味着所有内容必须登录。带连字符的 `fc2ppv-db.com` 是另一服务，本插件没有静默切换到它。
+
+## WebUI 设置
+
+`get_form()` 使用 MoviePilot 原生插件设置页，不另建网站。`get_page()` 显示最近交接状态和阻塞原因。
+
+| 设置 | 默认 | 含义 |
+| --- | --- | --- |
+| enabled | false | 启用插件能力；初始化不联网 |
+| sources | Manko | 多选元数据来源，选择顺序即自动查询顺序 |
+| storage | local | 当前只支持本地挂载文件，暂不接受远程存储 |
+| recognize_dirs | 空 | 每行一个 MoviePilot 容器内绝对输入目录，含子目录 |
+| downloader | 空 | MoviePilot 已配置并启用的 qBittorrent 名称；其它下载器拒绝 |
+| torrent_tag | 空 | 单个专用标签，按逗号分隔后的完整标签精确匹配 |
+| discovery_enabled | false | 每五分钟检查完成任务，行为由自动模式决定 |
+| handoff_mode | discover | discover 只发现；preview 查询并预览；execute 原生整理并刮削 |
+| target_path | 空 | 既有本地目标目录，不允许与输入目录相互包含 |
+| transfer_type | 空 | 必须明确选择 copy 复制或 link 硬链接；无默认搬运方式 |
+| ownership_ack | false | 执行前确认相同来源已排除在宿主原生自动监控之外 |
+| auxiliary_ack | false | 执行前确认理解原生 TMDB 辅助补充风险并核对预览 |
+| handoff_limit | 1 | 每轮最多准备/处理的新文件数，范围 1–5 |
+| image_hosts | 空 | 批准的图片 HTTPS 精确主机，每行一个；空值不提供图像地址 |
+| actor_images | false | GFriends 演员缩略图，还须批准 raw.githubusercontent.com 主机 |
+
+### Docker 路径
+
+**输入和目标都填写 MoviePilot 容器看到的路径。** 插件使用宿主下载器返回的、已完成路径映射的 `content_path/path`。不使用原始 qBittorrent `save_path` 重拼，不再进行第二次 Docker 路径映射。
+
+预览/执行还通过公开 `torrent_files` 清单核对 hash 的文件所有权：只将既有范围内路径与清单相对名相交，锚点使用宿主已映射的 save_path，不猜路径或重复映射。拒绝绝对名/穿越/重复冲突/未完成文件，忽略 priority=0 的未选择项；共享目录里不属于该种子的额外视频不会入队。入队和提交前都重新核对。
+
+目录判断要求路径和文件实际存在，拒绝相对路径、根目录 `/`、`..`、目录前缀碰撞和符号链接逃逸。词法路径与真实目标都要在允许范围内；提交前再次核对真实路径、设备/inode、大小和修改时间。
+
+### 自动模式
+
+1. 只读发现：不查询元数据源，不提交整理，不修改种子标签
+2. 预览：会查询所选元数据源、可选 GFriends 索引及宿主原生辅助来源，并可能写缓存/临时规划状态；不搬运媒体。目标目录和整理方式必须填好
+3. 执行：还必须开启两项确认。插件先调用原生预览，要求成功且仅对应当前源文件、目标落在明确目录内，再保存提交意图并同步交给 MoviePilot。不会使用 force，不清理旧历史，不附带整理其它文件
+
+不得让同一来源同时由本插件和宿主原生下载器/目录监控整理。插件不会自动修改监控设置，必须由用户配置和确认。
+
+新发现使用宿主 `TRANSFER` 完成过滤。宿主可能在首个文件结束时为整条种子加“已整理”；因此每条种子的全部 eligible 文件会先在一个事务里入插件账本，后续既有队列不把该标签误当成整个插件批次完成。
+
+继续排队文件时，插件通过公开 SDK 服务目录取得 qBittorrent 实例，能力检查后只读调用 `get_completed_torrents(ids=[hash], tags=None)`；还要求已知安全原始状态、有限数值 progress≥1、amount_left=0 和当前专用标签。映射路径仍从宿主链式查询取得。**不只信任普通 hash 查询归一后的 completed 状态**。能力缺失、未知原始状态、用户移除标签或路径变化时停止交接；不访问私有 qbc、不读取凭据、不删除或补写标签。这个实例能力已在 v3.1.1 验证，未来版本缺失时失败关闭。
+
+每轮最多查看 100 个种子、入队 500 个视频文件，使用持久公平游标；不会为了凑数量拆开一条种子的准入。单条种子超过 500 个候选视频时保守拒绝自动处理。默认每轮仅处理一个新文件。
+
+**原生副作用仍由 MoviePilot 管理**：实际执行可能产生历史记录、元数据文件、通知和原生“已整理”标签。插件本身不额外改标签，也不把宿主的整种子标记当成每个文件都完成的证据。
+
+## 什么才算完成
+
+公开 `do_transfer` 的 True 可能只是受理或历史跳过，不能直接算完成。
+
+插件用公共只读历史查询核对：来源+原生 ID、源路径/存储、文件大小/mtime、下载器/hash、整理方式、精确预览目标、新历史 ID，并确认目标文件存在且大小吻合。已有同版本、同意图的成功历史可核实后跳过重复操作。证据不足保留 accepted/uncertain；后续只读核实，不再次提交。这里的 completed 仅表示文件整理已核实，宿主后续异步 NFO/图片刮削是独立步骤，不冒称已经逐项验证完成。
+
+执行所有权按物理源文件版本建立，独立于目标、来源顺序、qbit hash 或路径别名等可变配置。更改设置不能绕过 submitting/accepted/uncertain 记录重新整理同一版本。需要重整请先在 MoviePilot 历史/队列核实并使用其明确手动流程。
+
+账本不自动过期、淘汰或重置；损坏/不兼容时失败关闭。容量满仅拒绝新准入，既有队列和只读核实继续。进程在 preparing 阶段退出会保留准备状态等待复核；在实际调用前后退出或响应不明时，保留未知状态，绝不猜测没执行。不要删除账本来“重试”未知操作。
+
+## 原生手动整理与刮削
+
+启用后，宿主来源列表、来源搜索、手动整理及手动刮削后台合同都能调用本插件同步/异步方法。只有明确选择本插件已启用来源才查询；来源为空或为普通内置来源时退出，不捕获全局影片。
+
+来源查询也服务于既有身份回查，不能仅凭方法签名声称识别出了“手动调用”。这些元数据查询没有文件路径，因此不套用 qBittorrent 自动触发目录规则；实际手动文件操作仍由 MoviePilot 手动入口和用户选择决定。前端页面没有实屏验收。
+
+## 宿主 TMDB 辅助补充限制
+
+官方 v3.1.1 原生整理仍会明确调用 `supplement_tmdb_info()`。对应能力是列表聚合且 `plugin_short_circuit=False`，不能靠本插件空返回或取消 SEARCH_SOURCE 阻止。
+
+主来源与标题保留，但可能追加不匹配的 TMDB/IMDb/TVDB/合集 ID、类型 ID 和别名。宿主分类会读 `genre_ids`。插件的 NFO 从独立验证缓存生成，不输出后来追加的辅助身份；这不等于所有宿主功能都被隔离。自动交接明确关闭类型/类别子目录选项，但宿主仍可能使用辅助信息。
+
+先用预览核对命名与目标，再决定是否开启执行。插件不伪造 TMDB ID、不伪装音乐类型、不 monkey patch、不修改宿主。
+
+## 网络、缓存与安全输出
+
+所有直连请求每次读取 `app.sdk.config.settings.PROXY`，没有独立代理。TLS 验证开启；匿名来源禁用环境隐式认证/netrc和站点Cookie，代理仍显式继承MoviePilot设置；SDK 自动重定向关闭。次源只手动处理最多 4 次、相同 HTTPS origin（含端口）的已校验详情路由跳转，拒绝循环、凭据、登录/挑战/年龄确认和跨来源跳转。
+
+只发送严格校验的番号或来源 ID，不发送完整文件路径。来源+ID 独立缓存；不选搜索首项、不猜 CID 转番号、不补零。支持保守番号形式、数字厂牌前缀及 FC2 编号。JSON 元数据缓存限量、过期、原子写入，不读取旧 pickle；同宿主进程实例共享路径锁并重读合并，未提供多个 OS 进程共享 JSON 目录的事务保证。自动交接 SQLite 使用独立事务账本，不修改宿主数据库。
+
+XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，拒绝凭据、IP、本地主机及控制/空白字符；固定 poster.jpg/fanart.jpg 文件名。GFriends 配置或主机授权撤销后，缓存 NFO 也停止输出相应缩略图。图像保存交由宿主；宿主自身图片下载器的 DNS/重定向策略不由插件保证。
+
+## 测试、版本与许可
+
+基线：官方 MoviePilot v3.1.1，commit `6ff7dd86a14c403b0e408f778aa3174e13e15ef1`，Python 3.14.7。
+
+模块 `plugins.v3/xiaojiejiescraping`，类 `XiaojiejieScraping`，索引 `package.v3.json`。2.0.0 表示沿原方案重写的开发版本。宿主支持的 PEP 440 范围为 `>=3.1.1,<4`，不硬锁持续更新的 V3；仅 v3.1.1 已测试，未来 V3 基于公共合同预期兼容但不保证。
+
+```sh
+export MOVIEPILOT_BACKEND=/absolute/path/to/MoviePilot
+cd /absolute/path/to/MoviePilot-Plugins
+"$MOVIEPILOT_BACKEND/.venv/bin/python" -m pytest tests -q
+```
+
+测试使用官方引导、临时 CONFIG_DIR、真实 SDK/模型/SQLite和合成 HTTP/执行回放，收集及执行阶段禁止真实 DNS/socket。未访问真实媒体站点、图片、付费模型、实际下载器或 NAS，未启动生产应用生命周期。没有 GitHub Actions、凭据、宿主改动。
+
+GPL-3.0，完整文本见 [LICENSE](LICENSE)，来源说明见 [NOTICE](NOTICE)。沿用 [hyuan280/JAVRecognize 1.1](https://github.com/hyuan280/MoviePilot-Plugins/tree/main/plugins.v2/javrecognize) 的独立来源/原生整理思路；Manko 编码合同保留原作者署名，其余适配器依据公开协议事实独立编写，未复制 MetaTube 实现。

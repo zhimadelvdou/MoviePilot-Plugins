@@ -109,11 +109,37 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，拒绝凭据、IP、本地主机及控制/空白字符；固定 poster.jpg/fanart.jpg 文件名。GFriends 配置或主机授权撤销后，缓存 NFO 也停止输出相应缩略图。图像保存交由宿主；宿主自身图片下载器的 DNS/重定向策略不由插件保证。
 
+## 查询诊断（0.2）
+
+在 MoviePilot 的 INFO 日志中搜索 `Xiaojiejie-Scraping diagnostic`。保存设置时记录启用状态和已选来源；查询时记录来源、阶段、缓存命中及接受/拒绝原因。Manko 另外记录以下细分原因，同步和异步入口均适用：
+
+- `disabled` / `source_unselected`：插件未启用，或调用来源不在插件当前所选列表
+- `number_not_unique`：输入未提取到唯一可接受番号；不代表网站未收录
+- `http_response` / `http_redirect` / `http_error`：已得到 SDK 响应；只有响应提供有效整数时才带 `http_status`。例如 403 表示请求被拒绝，不能据此判断作品是否收录
+- `transport_unavailable` / `request_exception`：SDK 未返回响应或调用抛出异常；不猜测是代理、DNS、TLS、超时还是其它问题，不编造 HTTP 状态
+- `invalid_json` / `payload_invalid`：响应不能解析为 JSON，或 JSON/base91 载荷不符合既有合同
+- `schema_invalid` / `search_incomplete`：字段形状不兼容，或总数/分页证据不足，无法证明结果完整
+- `no_candidates`：格式和总数通过校验的搜索返回零候选；`no_exact_match`：取得候选详情后没有精确匹配；`ambiguous_match`：多个不同原生 ID 精确命中
+- `identity_mismatch` / `number_evidence_invalid`：详情身份或番号证据不一致；`actors_invalid` 只表示可选演员列表无效
+- `cache_hit` / `cache_miss`、`accepted` / `empty_result` / `query_exception`：插件查询整体结果；其它来源目前只提供这一层诊断，不据空结果猜测其 HTTP 状态或具体解析原因
+
+示例：`Xiaojiejie-Scraping diagnostic source=manko operation=search reason=http_error http_status=403`。每行仅包含固定词表和有限整数，不包含番号、原生 ID、搜索词、完整 URL/参数、代理地址、请求头、Cookie、响应正文、异常文本、标题或文件路径。SDK 未提供状态时省略该字段；诊断不增加请求或自动重试、不改变匹配与访问边界，也不绕过访问门槛。并发查询应结合日志时间和阶段阅读，不能把其它查询的相邻行当成同一个请求的证据。
+
 ## 测试、版本与许可
 
 基线：官方 MoviePilot v3.1.1，commit `6ff7dd86a14c403b0e408f778aa3174e13e15ef1`，Python 3.14.7。
 
-模块 `plugins.v3/xiaojiejiescraping`，类 `XiaojiejieScraping`，索引 `package.v3.json`。2.0.0 表示沿原方案重写的开发版本。宿主支持的 PEP 440 范围为 `>=3.1.1,<4`，不硬锁持续更新的 V3；仅 v3.1.1 已测试，未来 V3 基于公共合同预期兼容但不保证。
+模块 `plugins.v3/xiaojiejiescraping`，类 `XiaojiejieScraping`，索引 `package.v3.json`。当前版本按用户指定重设为 `0.2`，此前开发发布为 `2.0.0`。由于 `0.2` 在版本比较中低于 `2.0.0`，既有安装不一定出现自动升级提示；需要按下述方式重新安装当前版本。宿主支持的 PEP 440 范围为 `>=3.1.1,<4`，不硬锁持续更新的 V3；仅 v3.1.1 已测试，未来 V3 基于公共合同预期兼容但不保证。
+
+### 从 2.0.0 切换到 0.2
+
+先备份 MoviePilot 配置和本插件数据（尤其交接账本），刷新市场并确认同一仓库的版本为 `0.2`。已核对[官方前端 v3.1.2](https://github.com/jxxghp/MoviePilot-Frontend/blob/v3.1.2/src/components/dialog/PluginMarketDetailDialog.vue)：已安装且没有更新标记时，不显示更新/强制重装按钮，因此不能仅靠普通升级入口完成这次版本号回退。下面给出已核对的管理员后台合同；没有编造前端操作路径。
+
+无需改插件 ID、配置前缀或数据目录；同来源强制安装走宿主原有安装事务及配置重载，补丁没有数据迁移。不要删除账本或配置来触发升级。
+
+已核对 v3.1.1 后台合同：管理员可先调用 `GET /api/v1/plugin/source/XiaojiejieScraping/options?force=true` 刷新并核对候选，再调用 `POST /api/v1/plugin/source/XiaojiejieScraping/install`，请求体为 `{"repo_url":"https://github.com/zhimadelvdou/MoviePilot-Plugins","force":true}`。不传 `release_version`，安装仓库当前版本；若配置了其它 API 前缀，使用实际前缀。强制安装本身不会刷新来源库存，因此先刷新不能省略。该接口仍保留宿主身份验证、来源绑定和兼容性检查；如提示绑定其它仓库，先确认来源，不绕过检查。
+
+用户前端实屏和 NAS 未实测；上述为源码核对的后台合同，不提供含令牌的命令。安装后核对加载日志版本为 `0.2`，设置页仍保留原配置，再重做一次手动搜索查看诊断；无需开启自动执行。
 
 ```sh
 export MOVIEPILOT_BACKEND=/absolute/path/to/MoviePilot

@@ -9,11 +9,11 @@ from pathlib import Path
 import threading
 from app.sdk.plugin.base import _PluginBase
 from app.sdk.media import MediaInfo
-from app.sdk.logging import logger
 from app.sdk.services import DownloaderHelper
 from app.schemas.types import MediaSource, MediaType
 from .core import SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, project_record, record_numbers, render_nfo
 from .provider import MankoProvider
+from .diagnostics import diagnose
 from .direct_primary import FANZAProvider, MGStageProvider, DUGAProvider, SODProvider
 from .direct_secondary import JavBusProvider, Jav321Provider, FC2HubProvider
 from .fc2ppvdb import FC2PPVDBProvider
@@ -31,7 +31,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、原生手动来源入口与 qBittorrent 只读发现（实验版）"
     plugin_icon = ""
-    plugin_version = "2.0.0"
+    plugin_version = "0.2"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -100,6 +100,9 @@ class XiaojiejieScraping(_PluginBase):
                     self._handoff = HandoffCoordinator(ledger, handoff_config, self.recognize_scoped)
                 except HandoffLedgerError:
                     self._handoff_error = "交接账本不可用，自动交接已阻止；不会重置或删除旧状态"
+            diagnose("plugin", "configure", "enabled" if self._enabled else "disabled", count=len(self._active_sources))
+            for source in self._active_sources:
+                diagnose(source, "configure", "enabled")
 
 
     @staticmethod
@@ -308,46 +311,59 @@ class XiaojiejieScraping(_PluginBase):
     def _request(self, context, meta, mtype, media_source, media_id, explicit_source=False):
         with self._lock:
             if not self._enabled or not self._cache:
+                diagnose(media_source, "request", "disabled" if not self._enabled else "cache_unavailable")
                 return None
             source = str(media_source) if media_source is not None else None
             if explicit_source:
                 if source not in self._active_sources:
+                    diagnose(source, "request", "source_unselected")
                     return None
             elif not matches_scope(context, self._storage, self._dirs):
+                diagnose(source, "request", "scope_rejected")
                 return None
             source = source or (self._active_sources[0] if self._active_sources else None)
             if source not in self._active_sources or mtype not in (None, MediaType.MOVIE, MediaType.UNKNOWN):
+                diagnose(source, "request", "source_unselected" if source not in self._active_sources else "media_type_rejected")
                 return None
             if getattr(meta, "type", None) in (MediaType.TV, MediaType.MUSIC):
+                diagnose(source, "request", "media_type_rejected")
                 return None
             provider = self._adapters().get(source)
             if provider is None:
+                diagnose(source, "request", "provider_unavailable")
                 return None
             if media_id is not None:
                 identity = str(media_id)
                 if not media_source or not IDENTIFIER.fullmatch(identity):
+                    diagnose(source, "fetch", "invalid_id")
                     return None
                 return self._generation, provider, self._cache, source + ":id:" + identity, identity, None, source
             text = str(getattr(meta, "org_string", None) or getattr(meta, "name", None) or "")
             number = extract_number(text)
             if not number:
+                diagnose(source, "search", "number_not_unique")
                 return None
             return self._generation, provider, self._cache, source + ":number:" + number, None, number, source
 
     def _accept(self, request, packet: dict | None, persist: bool = True) -> MediaInfo | None:
         if not packet:
+            diagnose(request[-1], "accept", "empty_result")
             return None
         generation, _, cache, key, identity, number, source = request
         try:
             record, actual_number = packet["record"], packet["number"]
             if record.get("_source", source) != source:
+                diagnose(source, "accept", "source_mismatch")
                 return None
             if not IDENTIFIER.fullmatch(str(record["_id"])) or record_numbers(record) != {actual_number}:
+                diagnose(source, "accept", "number_evidence_invalid")
                 return None
             if (identity and str(record["_id"]) != identity) or (number and actual_number != number):
+                diagnose(source, "accept", "identity_mismatch")
                 return None
             with self._lock:
                 if not self._enabled or generation != self._generation:
+                    diagnose(source, "accept", "configuration_changed")
                     return None
                 projected = project_record(record, actual_number, self._current_actors(packet), self._image_hosts, source=source)
                 cached = {"packet": packet, "projected": projected}
@@ -356,9 +372,10 @@ class XiaojiejieScraping(_PluginBase):
                     cache.put(source + ":id:" + str(record["_id"]), cached)
             result = MediaInfo()
             result.from_dict(projected)
+            diagnose(source, "accept", "accepted")
             return result
         except (OSError, TypeError, ValueError, KeyError, AttributeError):
-            logger.warning("Xiaojiejie-Scraping: 来源结果或缓存无效，保留原生回退")
+            diagnose(source, "accept", "result_invalid")
             return None
 
     def recognize_scoped(self, context: RecognitionContext, meta=None, mtype=None, media_source=None, media_id=None, episode_group=None, cache=True) -> MediaInfo | None:
@@ -375,15 +392,16 @@ class XiaojiejieScraping(_PluginBase):
     def _recognize_request(self, request, cache=True):
         if request is None:
             return None
-        _, provider, store, key, identity, number, _ = request
+        _, provider, store, key, identity, number, source = request
         try:
             cached = store.get(key) if cache else None
+            diagnose(source, "fetch" if identity else "search", "cache_hit" if cached else "cache_miss")
             packet = cached.get("packet") if cached else provider.fetch(identity) if identity else provider.search(number)
             if packet and not cached:
                 packet = self._with_actor_images(packet)
             return self._accept(request, packet, persist=not bool(cached))
         except Exception:
-            logger.warning("Xiaojiejie-Scraping: 来源暂不可用，保留原生回退")
+            diagnose(source, "fetch" if identity else "search", "query_exception")
             return None
 
     async def async_recognize_scoped(self, context: RecognitionContext, meta=None, mtype=None, media_source=None, media_id=None, episode_group=None, cache=True) -> MediaInfo | None:
@@ -400,15 +418,16 @@ class XiaojiejieScraping(_PluginBase):
     async def _async_recognize_request(self, request, cache=True):
         if request is None:
             return None
-        _, provider, store, key, identity, number, _ = request
+        _, provider, store, key, identity, number, source = request
         try:
             cached = await asyncio.to_thread(store.get, key) if cache else None
+            diagnose(source, "fetch" if identity else "search", "cache_hit" if cached else "cache_miss")
             packet = cached.get("packet") if cached else await provider.async_fetch(identity) if identity else await provider.async_search(number)
             if packet and not cached:
                 packet = await self._async_with_actor_images(packet)
             return await asyncio.to_thread(self._accept, request, packet, persist=not bool(cached))
         except Exception:
-            logger.warning("Xiaojiejie-Scraping: 异步来源暂不可用，保留原生回退")
+            diagnose(source, "fetch" if identity else "search", "query_exception")
             return None
 
     def _actor_options(self):

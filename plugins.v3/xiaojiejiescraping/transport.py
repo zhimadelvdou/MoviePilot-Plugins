@@ -5,6 +5,29 @@ from http.cookiejar import DefaultCookiePolicy
 import requests
 from app.sdk.network import AsyncRequestUtils, RequestUtils
 
+from .diagnostics import diagnose
+
+
+def _diagnostic_json(response, source, operation):
+    """保留 SDK JSON 便捷方法的返回语义，仅从响应对象提取安全诊断。"""
+    if source is not None:
+        status = getattr(response, "status_code", None)
+        reason = ("transport_unavailable" if response is None else
+                  "http_error" if type(status) is int and 400 <= status <= 599 else
+                  "http_redirect" if type(status) is int and 300 <= status <= 399 else "http_response")
+        diagnose(source, operation, reason, status=status)
+    # requests 与异步 SDK 的响应真值语义不同；这里不改变原先的判定。
+    if response:
+        try:
+            payload = response.json()
+            if payload is None and source is not None:
+                diagnose(source, operation, "payload_invalid")
+            return payload
+        except Exception:
+            if source is not None:
+                diagnose(source, operation, "invalid_json")
+    return None
+
 
 class _NoCookies(DefaultCookiePolicy):
     """不在匿名元数据会话中接收或回送站点 Cookie。"""
@@ -33,15 +56,39 @@ class AnonymousRequestUtils(RequestUtils):
         super().close()
         self._anonymous_session.close()
 
-    def get_json(self, url, params=None, **kwargs):
-        """JSON 便捷调用也必须关闭调用方会话，而非只关闭 HTTP 响应。"""
+    def get_json(self, url, params=None, *, diagnostic_source=None, diagnostic_operation=None, **kwargs):
+        """使用公共 SDK request 观测状态，仍关闭响应及插件持有的会话。"""
+        response = None
         try:
-            return super().get_json(url, params=params, **kwargs)
+            response = self.request(method="get", url=url, params=params, **kwargs)
+            return _diagnostic_json(response, diagnostic_source, diagnostic_operation)
+        except Exception:
+            if diagnostic_source is not None:
+                diagnose(diagnostic_source, diagnostic_operation, "request_exception")
+            raise
         finally:
-            self.close()
+            try:
+                if response is not None:
+                    response.close()
+            finally:
+                self.close()
 
 
 class AnonymousAsyncRequestUtils(AsyncRequestUtils):
     """异步 SDK 同样禁止环境隐式身份；代理仍由调用方传 settings.PROXY。"""
     def __init__(self, **kwargs):
         super().__init__(trust_env=False, **kwargs)
+
+    async def get_json(self, url, params=None, *, diagnostic_source=None, diagnostic_operation=None, **kwargs):
+        """异步查询同样只记录安全状态，不输出异常文本或响应内容。"""
+        response = None
+        try:
+            response = await self.request(method="get", url=url, params=params, **kwargs)
+            return _diagnostic_json(response, diagnostic_source, diagnostic_operation)
+        except Exception:
+            if diagnostic_source is not None:
+                diagnose(diagnostic_source, diagnostic_operation, "request_exception")
+            raise
+        finally:
+            if response is not None:
+                await response.aclose()

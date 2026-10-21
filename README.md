@@ -13,13 +13,13 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 - 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
 - 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
 
-所有来源当前都是**离线适配、未实站验收**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾、歧义或分页无法证明完整性时，返回空结果。
+所有来源当前都是**离线适配、未实站验收**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾或分页无法证明完整性时返回空；需要唯一选择的自动识别遇到歧义也返回空，Manko 手动搜索例外见下文。
 
 ## 来源状态
 
 | 来源 | 已实现合同与限制 |
 | --- | --- |
-| Manko | 原公开 API/base91 合同；详情须能证明唯一番号；要求完整搜索总数 |
+| Manko | 原公开 API/base91 合同；详情须逐条证明精确番号并要求完整搜索总数；自动识别要求唯一原生 ID |
 | FANZA | 现代 `/av/content/` Product JSON-LD；不从 CID 猜番号，不支持未经验证的旧目录 |
 | MGStage | 原生产品 URL/品番详情；保留数字前缀；遇年龄门槛不设置确认 Cookie |
 | DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
@@ -93,6 +93,8 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 来源查询也服务于既有身份回查，不能仅凭方法签名声称识别出了“手动调用”。这些元数据查询没有文件路径，因此不套用 qBittorrent 自动触发目录规则；实际手动文件操作仍由 MoviePilot 手动入口和用户选择决定。前端页面没有实屏验收。
 
+Manko 的原生同步/异步手动搜索会列出所有逐条详情证明了同一番号的不同原生 ID，便于用户在 MoviePilot 手动流程中选择。`recognize_media`、`async_recognize_media` 和自动范围识别仍只接受唯一精确身份；同一番号命中多个不同 ID 时不会替用户选一条。多结果手动搜索不写共享番号缓存；按选定原生 ID 回查仍保持来源和身份校验。
+
 ## 宿主 TMDB 辅助补充限制
 
 官方 v3.1.1 原生整理仍会明确调用 `supplement_tmdb_info()`。对应能力是列表聚合且 `plugin_short_circuit=False`，不能靠本插件空返回或取消 SEARCH_SOURCE 阻止。
@@ -109,7 +111,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，拒绝凭据、IP、本地主机及控制/空白字符；固定 poster.jpg/fanart.jpg 文件名。GFriends 配置或主机授权撤销后，缓存 NFO 也停止输出相应缩略图。图像保存交由宿主；宿主自身图片下载器的 DNS/重定向策略不由插件保证。
 
-## 查询诊断（0.2）
+## 查询诊断（0.3）
 
 在 MoviePilot 的 INFO 日志中搜索 `Xiaojiejie-Scraping diagnostic`。保存设置时记录启用状态和已选来源；查询时记录来源、阶段、缓存命中及接受/拒绝原因。Manko 另外记录以下细分原因，同步和异步入口均适用：
 
@@ -127,19 +129,15 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 ## 测试、版本与许可
 
-基线：官方 MoviePilot v3.1.1，commit `6ff7dd86a14c403b0e408f778aa3174e13e15ef1`，Python 3.14.7。
+原有离线测试基线使用官方 MoviePilot v3.1.1（commit `6ff7dd86a14c403b0e408f778aa3174e13e15ef1`）。本次全量回归使用官方 MoviePilot v3.1.6 SDK、Python 3.14.7 和隔离 HTTP 回放，`1355 passed in 41.02s`；运行时未联网、未挂载生产环境。该结果验证的是合成回放，不代表生产部署或 NAS 验收。
 
-模块 `plugins.v3/xiaojiejiescraping`，类 `XiaojiejieScraping`，索引 `package.v3.json`。当前版本按用户指定重设为 `0.2`，此前开发发布为 `2.0.0`。由于 `0.2` 在版本比较中低于 `2.0.0`，既有安装不一定出现自动升级提示；需要按下述方式重新安装当前版本。宿主支持的 PEP 440 范围为 `>=3.1.1,<4`，不硬锁持续更新的 V3；仅 v3.1.1 已测试，未来 V3 基于公共合同预期兼容但不保证。
+模块 `plugins.v3/xiaojiejiescraping`，类 `XiaojiejieScraping`，索引 `package.v3.json`。当前版本为 `0.3`；此前版本 `0.2` 在版本比较中低于历史开发版 `2.0.0`，既有安装不一定出现自动升级提示。宿主支持的 PEP 440 范围为 `>=3.1.1,<4`，不硬锁持续更新的 V3；未来 V3 兼容性尚未验证。
 
-### 从 2.0.0 切换到 0.2
+### 部署后核验
 
-先备份 MoviePilot 配置和本插件数据（尤其交接账本），刷新市场并确认同一仓库的版本为 `0.2`。已核对[官方前端 v3.1.2](https://github.com/jxxghp/MoviePilot-Frontend/blob/v3.1.2/src/components/dialog/PluginMarketDetailDialog.vue)：已安装且没有更新标记时，不显示更新/强制重装按钮，因此不能仅靠普通升级入口完成这次版本号回退。下面给出已核对的管理员后台合同；没有编造前端操作路径。
+部署时保留现有仓库绑定、配置和插件数据。部署后核对加载版本为 `0.3`、原设置仍然保留，再使用 MoviePilot 手动入口测试所选来源的查询；自动识别对多身份仍应返回未匹配。具体主机、绑定方式和部署状态由相应环境记录维护。
 
-无需改插件 ID、配置前缀或数据目录；同来源强制安装走宿主原有安装事务及配置重载，补丁没有数据迁移。不要删除账本或配置来触发升级。
-
-已核对 v3.1.1 后台合同：管理员可先调用 `GET /api/v1/plugin/source/XiaojiejieScraping/options?force=true` 刷新并核对候选，再调用 `POST /api/v1/plugin/source/XiaojiejieScraping/install`，请求体为 `{"repo_url":"https://github.com/zhimadelvdou/MoviePilot-Plugins","force":true}`。不传 `release_version`，安装仓库当前版本；若配置了其它 API 前缀，使用实际前缀。强制安装本身不会刷新来源库存，因此先刷新不能省略。该接口仍保留宿主身份验证、来源绑定和兼容性检查；如提示绑定其它仓库，先确认来源，不绕过检查。
-
-用户前端实屏和 NAS 未实测；上述为源码核对的后台合同，不提供含令牌的命令。安装后核对加载日志版本为 `0.2`，设置页仍保留原配置，再重做一次手动搜索查看诊断；无需开启自动执行。
+历史说明：已核对的 MoviePilot v3.1.1 原生在线仓库 install API 合同，仅适用于已确认绑定在线仓库的安装。若当前来源身份为 `local_only`，不得据该历史合同切换到在线仓库。
 
 ```sh
 export MOVIEPILOT_BACKEND=/absolute/path/to/MoviePilot

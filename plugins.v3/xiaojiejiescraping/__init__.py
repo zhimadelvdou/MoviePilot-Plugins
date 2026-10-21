@@ -31,7 +31,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、原生手动来源入口与 qBittorrent 只读发现（实验版）"
     plugin_icon = ""
-    plugin_version = "0.2"
+    plugin_version = "0.3"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -289,24 +289,73 @@ class XiaojiejieScraping(_PluginBase):
         return await self._async_recognize_request(request, cache)
 
     def search_medias(self, meta, media_source=None) -> list[MediaInfo]:
-        """原生搜索只接受本来源及唯一可证明番号，不给宽泛标题猜测结果。"""
+        """原生手动搜索可展示 Manko 的全部精确原生身份，不给宽泛标题猜测结果。"""
         sources = media_source if isinstance(media_source, (tuple, list)) else (media_source,)
         results = []
         for source in dict.fromkeys(str(value) for value in sources):
-            result = self.recognize_media(meta=meta, media_source=source)
-            if result:
-                results.append(result)
+            if source == SOURCE:
+                request = self._request(None, meta, None, source, None, explicit_source=True)
+                results.extend(self._manual_manko_results(request))
+            else:
+                result = self.recognize_media(meta=meta, media_source=source)
+                if result:
+                    results.append(result)
         return results
 
     async def async_search_medias(self, meta, media_source=None) -> list[MediaInfo]:
-        """异步原生来源搜索，不混合不同来源的原生身份。"""
+        """异步原生手动搜索，与同步入口保持来源及候选语义一致。"""
         sources = media_source if isinstance(media_source, (tuple, list)) else (media_source,)
         results = []
         for source in dict.fromkeys(str(value) for value in sources):
-            result = await self.async_recognize_media(meta=meta, media_source=source)
-            if result:
-                results.append(result)
+            if source == SOURCE:
+                request = self._request(None, meta, None, source, None, explicit_source=True)
+                results.extend(await self._async_manual_manko_results(request))
+            else:
+                result = await self.async_recognize_media(meta=meta, media_source=source)
+                if result:
+                    results.append(result)
         return results
+
+    def _manual_manko_results(self, request) -> list[MediaInfo]:
+        if request is None:
+            return []
+        generation, provider, cache, _, _, number, source = request
+        try:
+            diagnose(source, "search", "cache_miss")
+            packets = provider.search_matches(number)
+            results = []
+            for packet in packets:
+                identity = str(packet["record"]["_id"])
+                candidate = (generation, provider, cache, source + ":id:" + identity, identity, number, source)
+                result = self._accept(candidate, self._with_actor_images(packet), persist=False)
+                if result is None:
+                    return []
+                results.append(result)
+            return results
+        except Exception:
+            diagnose(source, "search", "query_exception")
+            return []
+
+    async def _async_manual_manko_results(self, request) -> list[MediaInfo]:
+        if request is None:
+            return []
+        generation, provider, cache, _, _, number, source = request
+        try:
+            diagnose(source, "search", "cache_miss")
+            packets = await provider.async_search_matches(number)
+            results = []
+            for packet in packets:
+                identity = str(packet["record"]["_id"])
+                candidate = (generation, provider, cache, source + ":id:" + identity, identity, number, source)
+                enriched = await self._async_with_actor_images(packet)
+                result = await asyncio.to_thread(self._accept, candidate, enriched, persist=False)
+                if result is None:
+                    return []
+                results.append(result)
+            return results
+        except Exception:
+            diagnose(source, "search", "query_exception")
+            return []
 
     def _request(self, context, meta, mtype, media_source, media_id, explicit_source=False):
         with self._lock:

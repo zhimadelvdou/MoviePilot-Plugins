@@ -109,11 +109,19 @@ class MankoProvider:
         """仍由原有精确匹配函数决定结果；只统计同一规则下的不同 ID。"""
         selected = exact_candidate(details, number)
         if details:
-            matches = {str(row.get("_id") or "") for row in details
-                       if record_numbers(row) == {number} and IDENTIFIER.fullmatch(str(row.get("_id") or ""))}
+            matches = MankoProvider._matching_records(details, number)
             reason = "exact_match" if selected is not None else "ambiguous_match" if len(matches) > 1 else "no_exact_match"
             diagnose("manko", "search", reason, count=len(matches))
         return selected
+
+    @staticmethod
+    def _matching_records(details, number):
+        matches = {}
+        for row in details:
+            identity = str(row.get("_id") or "")
+            if record_numbers(row) == {number} and IDENTIFIER.fullmatch(identity):
+                matches.setdefault(identity, row)
+        return matches
 
     @staticmethod
     def _actors(actors):
@@ -197,3 +205,61 @@ class MankoProvider:
             return None
         actors = (await self._aget("/actors/" + selected.get("_id"), {"size": 24, "page": 1})).get("data", [])
         return {"record": selected, "number": number, "actors": self._actors(actors)}
+
+    def search_matches(self, number: str) -> list[dict]:
+        """为显式手动搜索返回所有逐条精确匹配的不同原生 ID。"""
+        number = normalize_number(number)
+        if not number:
+            diagnose("manko", "search", "number_not_unique")
+            return []
+        rows = self._records(self._get("/search", {"keyword": number, "size": 24, "page": 1}))
+        details = {}
+        for row in rows:
+            identity = str(row.get("_id") or "")
+            if not IDENTIFIER.fullmatch(identity):
+                diagnose("manko", "search", "invalid_id")
+                return []
+            if identity in details:
+                continue
+            detail = self._detail(self._get("/detail/" + identity), identity)
+            if not detail:
+                return []
+            details[identity] = detail
+        matches = self._matching_records(list(details.values()), number)
+        if details:
+            reason = "exact_match" if len(matches) == 1 else "ambiguous_match" if matches else "no_exact_match"
+            diagnose("manko", "search", reason, count=len(matches))
+        packets = []
+        for identity, record in matches.items():
+            actors = self._get("/actors/" + identity, {"size": 24, "page": 1}).get("data", [])
+            packets.append({"record": record, "number": number, "actors": self._actors(actors)})
+        return packets
+
+    async def async_search_matches(self, number: str) -> list[dict]:
+        """异步手动搜索，与同步逐条匹配并保持相同候选顺序。"""
+        number = normalize_number(number)
+        if not number:
+            diagnose("manko", "search", "number_not_unique")
+            return []
+        rows = self._records(await self._aget("/search", {"keyword": number, "size": 24, "page": 1}))
+        details = {}
+        for row in rows:
+            identity = str(row.get("_id") or "")
+            if not IDENTIFIER.fullmatch(identity):
+                diagnose("manko", "search", "invalid_id")
+                return []
+            if identity in details:
+                continue
+            detail = self._detail(await self._aget("/detail/" + identity), identity)
+            if not detail:
+                return []
+            details[identity] = detail
+        matches = self._matching_records(list(details.values()), number)
+        if details:
+            reason = "exact_match" if len(matches) == 1 else "ambiguous_match" if matches else "no_exact_match"
+            diagnose("manko", "search", reason, count=len(matches))
+        packets = []
+        for identity, record in matches.items():
+            actors = (await self._aget("/actors/" + identity, {"size": 24, "page": 1})).get("data", [])
+            packets.append({"record": record, "number": number, "actors": self._actors(actors)})
+        return packets

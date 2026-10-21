@@ -207,6 +207,136 @@ def plugin(monkeypatch, tmp_path, plugin_host_context):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
+def test_manual_manko_search_returns_each_exact_ambiguous_native_id(messages, replay, plugin, asynchronous):
+    first_id = "69a07400131836087e481b7a"
+    second_id = "69a3697d1b1225b605c52f5f"
+    first = {
+        "_id": first_id,
+        "category_id": "5f75927b5c425008d254a788",
+        "share_date": "2026-02-27",
+        "title_display_name": [{"lang": "en", "title": "ADN-765"}, {"lang": "ja", "title": "ADN-765"}],
+    }
+    second = {
+        "_id": second_id,
+        "category_id": "638ba0b6e6248f567f04b84c",
+        "share_date": "2026-02-27",
+        "title_display_name": [{"lang": "en", "title": "ADN-765"}, {"lang": "ja", "title": "ADN-765"}],
+    }
+    replay.payloads.update({
+        "/search": {"data": [{"_id": first_id}, {"_id": second_id}], "total": 2},
+        f"/detail/{first_id}": {"data": first},
+        f"/detail/{second_id}": {"data": second},
+        f"/actors/{first_id}": {"data": []},
+        f"/actors/{second_id}": {"data": []},
+    })
+    arguments = {"meta": SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), "media_source": "manko"}
+    results = asyncio.run(plugin.async_search_medias(**arguments)) if asynchronous else plugin.search_medias(**arguments)
+
+    assert [(item.media_source.value, item.media_id) for item in results] == [
+        ("manko", first_id), ("manko", second_id),
+    ]
+    number_key = "manko:number:ADN-765"
+    assert plugin._cache.get(number_key) is None
+
+    def recognize(**kwargs):
+        return asyncio.run(plugin.async_recognize_media(**kwargs)) if asynchronous else plugin.recognize_media(**kwargs)
+
+    for identity in (first_id, second_id):
+        selected = recognize(media_source="manko", media_id=identity)
+        assert selected.media_source.value == "manko" and selected.media_id == identity
+        assert plugin._cache.get(number_key) is None
+    assert recognize(meta=arguments["meta"], media_source="manko", cache=True) is None
+    assert plugin._cache.get(number_key) is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_manual_manko_search_deduplicates_duplicate_native_ids(messages, replay, plugin, asynchronous):
+    identity = "69a07400131836087e481b7a"
+    record = {
+        "_id": identity,
+        "category_id": "5f75927b5c425008d254a788",
+        "share_date": "2026-02-27",
+        "title_display_name": [{"lang": "en", "title": "ADN-765"}],
+    }
+    replay.payloads.update({
+        "/search": {"data": [{"_id": identity}, {"_id": identity}], "total": 2},
+        f"/detail/{identity}": {"data": record},
+        f"/actors/{identity}": {"data": []},
+    })
+    arguments = {"meta": SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), "media_source": "manko"}
+    results = asyncio.run(plugin.async_search_medias(**arguments)) if asynchronous else plugin.search_medias(**arguments)
+
+    assert [(item.media_source.value, item.media_id) for item in results] == [("manko", identity)]
+    assert replay.calls.count(f"/detail/{identity}") == 1
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("case", ["incomplete_total", "detail_identity", "two_numbers"])
+def test_manual_manko_search_rejects_incomplete_or_unverified_candidates(messages, replay, plugin, asynchronous, case):
+    identity = "69a07400131836087e481b7a"
+    record = {
+        "_id": identity,
+        "category_id": "5f75927b5c425008d254a788",
+        "share_date": "2026-02-27",
+        "title_display_name": [{"lang": "en", "title": "ADN-765"}],
+    }
+    total = 1
+    if case == "incomplete_total":
+        total = 2
+    elif case == "detail_identity":
+        record["_id"] = "69a3697d1b1225b605c52f5f"
+    else:
+        record["title_display_name"] = [{"lang": "en", "title": "ADN-765 XYZ-123"}]
+    replay.payloads.update({
+        "/search": {"data": [{"_id": identity}], "total": total},
+        f"/detail/{identity}": {"data": record},
+        f"/actors/{identity}": {"data": []},
+    })
+    arguments = {"meta": SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), "media_source": "manko"}
+
+    results = asyncio.run(plugin.async_search_medias(**arguments)) if asynchronous else plugin.search_medias(**arguments)
+
+    assert results == []
+    if case == "incomplete_total":
+        assert replay.calls == ["/search"]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_manual_manko_search_rejects_results_after_configuration_changes(monkeypatch, messages, plugin, asynchronous):
+    identity = "69a07400131836087e481b7a"
+    packet = {
+        "record": {
+            "_id": identity,
+            "category_id": "5f75927b5c425008d254a788",
+            "share_date": "2026-02-27",
+            "title_display_name": [{"lang": "en", "title": "ADN-765"}],
+        },
+        "number": "ADN-765",
+        "actors": [],
+    }
+    request_provider = plugin._provider
+    if asynchronous:
+        async def search_matches(_number):
+            plugin.init_plugin({"enabled": True})
+            return [packet]
+        monkeypatch.setattr(request_provider, "async_search_matches", search_matches)
+        results = asyncio.run(plugin.async_search_medias(
+            meta=SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), media_source="manko",
+        ))
+    else:
+        def search_matches(_number):
+            plugin.init_plugin({"enabled": True})
+            return [packet]
+        monkeypatch.setattr(request_provider, "search_matches", search_matches)
+        results = plugin.search_medias(
+            meta=SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), media_source="manko",
+        )
+
+    assert results == []
+    assert has_reason(messages, "configuration_changed")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("case,reason", [("disabled", "disabled"), ("unselected", "source_unselected"), ("input", "number_not_unique"), ("source", "source_unselected")])
 def test_plugin_rejections_do_not_reach_network(messages, replay, plugin, asynchronous, case, reason):
     arguments = {"meta": SimpleNamespace(org_string="TEST-123", type=None), "media_source": "manko"}
@@ -227,11 +357,11 @@ def test_plugin_rejections_do_not_reach_network(messages, replay, plugin, asynch
 def test_plugin_results_and_cache_have_safe_diagnostics(messages, replay, plugin, asynchronous):
     arguments = {"meta": SimpleNamespace(org_string="/private/nas/TEST-123.mkv", type=None), "media_source": "manko"}
     def run():
-        return asyncio.run(plugin.async_search_medias(**arguments)) if asynchronous else plugin.search_medias(**arguments)
-    assert len(run()) == 1
+        return asyncio.run(plugin.async_recognize_media(**arguments)) if asynchronous else plugin.recognize_media(**arguments)
+    assert run() is not None
     assert has_reason(messages, "cache_miss") and has_reason(messages, "accepted")
     calls = list(replay.calls)
-    assert len(run()) == 1
+    assert run() is not None
     assert replay.calls == calls and has_reason(messages, "cache_hit")
 
 

@@ -30,11 +30,19 @@ class FakeProvider:
     def search(self, number):
         return self._result("search", number)
 
+    def search_matches(self, number):
+        packet = self._result("search_matches", number)
+        return [packet] if packet else []
+
     def fetch(self, identity):
         return self._result("fetch", identity)
 
     async def async_search(self, number):
         return self._result("async_search", number)
+
+    async def async_search_matches(self, number):
+        packet = self._result("async_search_matches", number)
+        return [packet] if packet else []
 
     async def async_fetch(self, identity):
         return self._result("async_fetch", identity)

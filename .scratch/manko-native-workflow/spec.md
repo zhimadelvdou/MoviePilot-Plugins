@@ -4,7 +4,7 @@
 
 From MoviePilot file management, automatically extract the number from the selected folder/file name under the chosen Manko source, keep the original downloaded file, hard-link the selected media into a different user-confirmed destination, and let MoviePilot create the destination directory/name and write NFO and artwork there. Daily manual entry of a native media ID is not an acceptable final workflow.
 
-## Current evidence and gap
+## Baseline evidence and remaining acceptance
 
 On 2026-10-21, the deployed `XiaojiejieScraping` 0.3 returned two exact Manko candidates for the tested number. Automatic recognition correctly failed closed with `ambiguous_match` and returned no media context. A path-only file-manager `recognize_file` request returned HTTP 200 with `context.media_info=None`; an explicit Manko request for the same path also returned an empty media context after the two-candidate ambiguity. A separate lookup by a known native ID returned usable Manko detail metadata. These results do not prove the file-manager flow carries recognition identity into reorganization.
 
@@ -16,7 +16,7 @@ For V3.1.6, a video recognition request without an explicit source defaults to T
 
 - The file-manager flow must extract a number from the selected folder/file name and query using the chosen Manko source without daily manual ID entry.
 - When multiple exact Manko IDs match a number, automatically choose a stable representative only if the detail records differ solely in the explicitly observed transport/category fields, all required title/date/cover/overview metadata is present, and each work's named-actor response set matches exactly. Any other raw-field, actor, or completeness difference remains ambiguous; never choose the first result silently or poison the shared number cache. Manual search continues to expose every exact ID.
-- Carry the resolved `(media_source, media_id)` identity consistently through preview and final transfer. Source override parameters and complete current handoff are still being verified.
+- Carry the resolved `(media_source, media_id)` identity consistently through preview and final transfer. Automatic preview is verified; final real transfer and file persistence remain unexecuted.
 - Reject missing, mismatched, or changed identity between preview and transfer. Do not fall back to TMDB while presenting the result as Manko.
 - Preserve the downloaded original and use a hard link only after the user confirms the exact destination and operation. The observed auto-matched destination `/media/Link/电影/` is not yet confirmed as the final target.
 - Keep automatic discovery disabled and preserve existing source/ID validation, path safety, ledger, and host safety boundaries.
@@ -30,6 +30,6 @@ For V3.1.6, a video recognition request without an explicit source defaults to T
 5. MoviePilot creates the expected target directory/name for the selected identity and actually writes the expected NFO and cover image into the target. In-memory metadata and image URLs alone do not pass this criterion.
 6. Automatic discovery remains disabled; no production transfer or scrape is required for code-level tests.
 
-Current status: this is an open workflow task. Version 0.4 allows automatic identity resolution only for fully equivalent multiple Manko records, with a stable native-ID representative; all other ambiguity remains fail-closed. Manual search still exposes every exact ID. The 2026-10-22 user screenshot confirms a manually entered native ID can produce a successful preview, but complete automatic folder/name source forwarding and identity handoff remain unverified; no transfer or scrape was executed.
+Current status: the automatic filename/folder recognition fix is implemented and deployed. Version 0.4 resolves strictly equivalent Manko records with a stable representative; other ambiguity remains fail-closed and manual search still exposes every ID. The frontend sends independent `recognize_source` when the ID is blank; the backend forwards and persists it per request without weakening identity-pair validation. On 2026-10-22 the live no-ID preview returned one success and zero failures for the user directory, with the expected target path. Plugin tests passed 1397 cases, frontend dialog 61 cases plus types/lint/build, and related backend tests passed 114 cases. Config, source binding, ledger and original directory entries were preserved. The broader workflow task remains open for actual hard-link inode/source-content verification and destination NFO/artwork persistence; no real transfer or scrape was executed.
 
 Actor-response evidence boundary: the current actor endpoint is queried by work ID. In the observed response, it returned two actors with only a top-level `data` list and no `total`; requests with `size=1,page=1` and `size=1,page=2` returned the same two-item set. The equivalence check treats each work's returned set as its actor metadata and compares those sets. It does not claim that the upstream actor catalog is complete. A response with `total` must match the returned length, and an unbounded full page of 24 without `total` is rejected.

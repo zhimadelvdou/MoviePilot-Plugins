@@ -19,6 +19,10 @@ const parentPath = ref('')
 const browseItems = ref([])
 const now = ref(Date.now())
 const pendingPreviewId = ref('')
+const automaticStatus = ref(null)
+const automaticStatusBusy = ref(false)
+const automaticCheckBusy = ref(false)
+const automaticCheckMessage = ref('')
 let requestGeneration = 0
 let clockTimer
 const previewExpiryMs = computed(() => {
@@ -41,7 +45,20 @@ const executionLocked = computed(() => outcome.value === 'pendingaccepted' || ou
 const formLocked = computed(() => busy.value || executionLocked.value)
 const canExecute = computed(() => !!preview.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && confirmed.value && !busy.value && !previewBusy.value && outcome.value === '')
 const endpoint = (name) => `plugin/${props.pluginId}/manual/${name}`
+const automaticEndpoint = (name) => `plugin/${props.pluginId}/automatic/${name}`
 const storageKey = () => `xiaojiejiescraping:manual-pending:${props.pluginId}`
+const automaticModeLabel = computed(() => {
+  if (!automaticStatus.value) return '状态未获取'
+  if (!automaticStatus.value.enabled) return '自动触发已关闭'
+  if (automaticStatus.value.mode === 'discover') return '只读发现'
+  if (automaticStatus.value.mode === 'preview') return '自动预览'
+  if (automaticStatus.value.mode === 'execute') return '自动整理并刮削'
+  return '自动模式未知'
+})
+const automaticCounts = computed(() => {
+  const counts = automaticStatus.value?.counts
+  return counts && typeof counts === 'object' ? Object.entries(counts).filter(([, value]) => typeof value === 'number') : []
+})
 
 function invalidatePreview() {
   if (formLocked.value) return
@@ -185,10 +202,33 @@ async function restorePendingPreview() {
   outcome.value = 'unknown'
   await refreshStatus()
 }
+function formatAutomaticTime(value) {
+  if (value === null || value === undefined || value === '') return '尚未记录'
+  const timestamp = typeof value === 'number' ? value * 1000 : Date.parse(value)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : '时间未知'
+}
+async function loadAutomaticStatus() {
+  automaticStatusBusy.value = true
+  try { automaticStatus.value = await props.api.get(automaticEndpoint('status')) }
+  catch { automaticStatus.value = null }
+  finally { automaticStatusBusy.value = false }
+}
+async function checkAutomaticConditions() {
+  automaticCheckBusy.value = true
+  automaticCheckMessage.value = ''
+  try {
+    const result = await props.api.post(automaticEndpoint('check'))
+    if (result?.ready === true) automaticCheckMessage.value = '触发条件当前就绪。'
+    else if (result?.ready === false) automaticCheckMessage.value = '触发条件当前未就绪。'
+    else automaticCheckMessage.value = '检查已完成；条件结果未返回。'
+  } catch { automaticCheckMessage.value = '触发条件检查暂不可用。' }
+  finally { automaticCheckBusy.value = false }
+}
 onMounted(async () => {
   clockTimer = setInterval(() => { now.value = Date.now() }, 500)
   await loadOptions()
   await restorePendingPreview()
+  await loadAutomaticStatus()
 })
 onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 </script>
@@ -196,6 +236,18 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 <template>
   <main class="manual-page">
     <header><div><p class="eyebrow">MANUAL LIBRARY TRANSFER</p><h1>手动识别与整理</h1><p>选择已有目录，预览识别结果后再确认整理。源文件会保留。</p></div><button data-testid="reload-options" :disabled="formLocked" @click="loadOptions">重新加载</button></header>
+    <section class="panel auto-panel" data-testid="automatic-status">
+      <div class="section-title"><div><h2>自动触发</h2><p>按已配置的 qBittorrent 下载器和标签检查下载完成任务。</p></div><button data-testid="automatic-refresh" :disabled="automaticStatusBusy" @click="loadAutomaticStatus">只读刷新状态</button></div>
+      <p v-if="!automaticStatus" class="muted">自动触发状态未获取；手动识别与预览仍可使用。</p>
+      <template v-else>
+        <p><strong>{{ automaticModeLabel }}</strong><span> · {{ automaticStatus.armed ? '已启动' : '未启动' }}</span><span v-if="automaticStatus.started_at"> · 启动于 {{ formatAutomaticTime(automaticStatus.started_at) }}</span></p>
+        <p>{{ automaticStatus.new_only ? '仅处理启用后完成的下载；历史完成任务跳过。' : '会包含启用前已完成的旧任务。' }}</p>
+        <dl class="automatic-details"><dt>下载器 / 标签</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.torrent_tag || '未设置' }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>根目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
+        <p v-if="automaticCounts.length" class="count-list">计数：<span v-for="([key, value]) in automaticCounts" :key="key">{{ key }} {{ value }} · </span></p>
+        <p v-if="automaticStatus.error" class="error">{{ automaticStatus.error }}</p>
+      </template>
+      <div class="automatic-actions"><button data-testid="automatic-check" :disabled="automaticCheckBusy" @click="checkAutomaticConditions">{{ automaticCheckBusy ? '检查中…' : '检查触发条件（只读）' }}</button><span v-if="automaticCheckMessage" class="muted">{{ automaticCheckMessage }}</span></div>
+    </section>
     <p v-if="!options?.enabled && options" class="notice">此功能当前不可用。</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <section class="panel fields">
@@ -216,5 +268,5 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 </template>
 
 <style scoped>
-.manual-page{box-sizing:border-box;min-height:100vh;max-width:1120px;margin:0 auto;padding:28px;color:#17232d;background:#f5f8f7;font:15px/1.5 system-ui,sans-serif}.manual-page *{box-sizing:border-box}header,.section-title,.actions,.path-row{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:22px}h1,h2{color:#17232d}h1{margin:0;font-size:28px}h2{margin:0;font-size:19px}.eyebrow{color:#638078;font-size:11px;letter-spacing:.14em}.panel{padding:22px;border:1px solid #dce5e3;border-radius:14px;background:#fff;margin:16px 0;box-shadow:0 5px 20px #1231}.fields{display:grid;gap:18px}.fields label{display:grid;gap:7px;font-weight:600}.path-row input,select{width:100%;min-width:0;padding:10px;border:1px solid #bdcbc8;border-radius:7px;font:inherit}.path-row input{flex:1}button{border:1px solid #b8c8c4;background:#fff;border-radius:7px;padding:9px 13px;color:inherit;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#176b5f;border-color:#176b5f;color:#fff}.muted{color:#667874}.notice{color:#805a12}.error{color:#a33434}.valid{color:#15704e}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e4ecea;overflow-wrap:anywhere}.confirm{display:flex;gap:9px;align-items:flex-start;margin:18px 0}.overlay{position:fixed;inset:0;background:#10201c77;display:grid;place-items:center;padding:18px}.browser{width:min(680px,100%);max-height:80vh;overflow:auto;background:#fff;border-radius:14px;padding:20px}.browser header{margin:0}.current-path{overflow-wrap:anywhere;color:#667874}.root-list{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}li{margin:5px 0}
+.manual-page{box-sizing:border-box;min-height:100vh;max-width:1120px;margin:0 auto;padding:28px;color:#17232d;background:#f5f8f7;font:15px/1.5 system-ui,sans-serif}.manual-page *{box-sizing:border-box}header,.section-title,.actions,.path-row{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:22px}h1,h2{color:#17232d}h1{margin:0;font-size:28px}h2{margin:0;font-size:19px}.eyebrow{color:#638078;font-size:11px;letter-spacing:.14em}.panel{padding:22px;border:1px solid #dce5e3;border-radius:14px;background:#fff;margin:16px 0;box-shadow:0 5px 20px #1231}.auto-panel p{margin:8px 0}.automatic-details{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:14px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}.automatic-actions{display:flex;align-items:center;gap:12px}.count-list{color:#667874}.fields{display:grid;gap:18px}.fields label{display:grid;gap:7px;font-weight:600}.path-row input,select{width:100%;min-width:0;padding:10px;border:1px solid #bdcbc8;border-radius:7px;font:inherit}.path-row input{flex:1}button{border:1px solid #b8c8c4;background:#fff;border-radius:7px;padding:9px 13px;color:inherit;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#176b5f;border-color:#176b5f;color:#fff}.muted{color:#667874}.notice{color:#805a12}.error{color:#a33434}.valid{color:#15704e}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e4ecea;overflow-wrap:anywhere}.confirm{display:flex;gap:9px;align-items:flex-start;margin:18px 0}.overlay{position:fixed;inset:0;background:#10201c77;display:grid;place-items:center;padding:18px}.browser{width:min(680px,100%);max-height:80vh;overflow:auto;background:#fff;border-radius:14px;padding:20px}.browser header{margin:0}.current-path{overflow-wrap:anywhere;color:#667874}.root-list{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}li{margin:5px 0}
 </style>

@@ -5,9 +5,10 @@ import Config from '../src/Config.vue'
 
 const goodPreview = { preview_id: 'p1', expires_at: 4070908800, items: [{ source: '/src/a.mp4', target: '/dst/a.mp4', title: '影片', media_source: 'manko', media_id: 'ID-123', success: true, message: 'ok' }], summary: { total: 1, success: 1, failed: 0 } }
 const options = { sources: [{ title: 'Manko', value: 'manko' }], roots: ['/downloads'], default_target_path: '/library', transfer_type: 'link', enabled: true }
+const automaticStatus = { enabled: false, mode: 'discover', new_only: true, armed: false, started_at: null, interval_seconds: 300, downloader: 'qb', torrent_tag: 'Manko', roots: ['/downloads'], target_path: '/library', last_poll_at: null, counts: {}, error: '' }
 const mounted = []
 const setup = (overrides = {}) => {
-  const api = { get: vi.fn(async (url) => url.endsWith('/options') ? options : { state: 'completed', items: [], summary: {} }), post: vi.fn(async (url) => url.endsWith('/preview') ? goodPreview : ({ state: 'completed', items: [], summary: {} })) }
+  const api = { get: vi.fn(async (url) => url.endsWith('/options') ? options : url.endsWith('/automatic/status') ? automaticStatus : { state: 'completed', items: [], summary: {} }), post: vi.fn(async (url) => url.endsWith('/preview') ? goodPreview : ({ state: 'completed', items: [], summary: {} })) }
   const wrapper = mount(Page, { props: { api, pluginId: 'plugin-x', sourcePluginId: 'source-x' } })
   mounted.push(wrapper)
   return { api, wrapper, ...overrides }
@@ -26,6 +27,41 @@ describe('manual transfer page', () => {
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({ path: '/downloads/TEST-123-C', target_path: '/library', media_source: 'manko', transfer_type: 'link' }))
+    expect(wrapper.text()).toContain('ID-123')
+  })
+
+  it('shows automatic triggering as disabled without enabling or executing anything', async () => {
+    const { api, wrapper } = setup()
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('plugin/plugin-x/automatic/status')
+    expect(wrapper.text()).toContain('自动触发已关闭')
+    expect(wrapper.text()).toContain('历史完成任务跳过')
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('shows armed automatic mode and its backend start time', async () => {
+    const { api, wrapper } = setup()
+    const startedAt = 1761113520
+    api.get.mockImplementation(async url => url.endsWith('/options') ? options : ({ ...automaticStatus, enabled: true, mode: 'execute', armed: true, started_at: startedAt }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('自动整理并刮削')
+    expect(wrapper.text()).toContain('已启动')
+    expect(wrapper.text()).toContain(new Date(startedAt * 1000).toLocaleString())
+  })
+
+  it('keeps manual preview available when automatic status is unavailable', async () => {
+    const { api, wrapper } = setup()
+    api.get.mockImplementation(async url => {
+      if (url.endsWith('/options')) return options
+      if (url.endsWith('/automatic/status')) throw new Error('unsupported')
+      return { state: 'completed', items: [], summary: {} }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('自动触发状态未获取')
+    await wrapper.get('[data-testid="source-path"]').setValue('/downloads/manual')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({ path: '/downloads/manual' }))
     expect(wrapper.text()).toContain('ID-123')
   })
 
@@ -235,7 +271,10 @@ it('config edits preserve every original and unknown setting in the saved object
   const initialConfig = { enabled: false, sources: ['manko'], storage: 'local', recognize_dirs: '', image_hosts: '', discovery_enabled: false, downloader: '', torrent_tag: '', actor_images: false, handoff_mode: 'discover', target_path: '', transfer_type: '', ownership_ack: false, auxiliary_ack: false, handoff_limit: 1, future_key: { keep: true } }
   const wrapper = mount(Config, { props: { initialConfig } })
   mounted.push(wrapper)
+  expect(wrapper.get('[data-testid="config-auto_new_only"]').element.checked).toBe(true)
+  expect(wrapper.get('[data-testid="config-handoff-mode"]').text()).toContain('自动整理并刮削')
   await wrapper.get('[data-testid="config-enabled"]').setValue(true)
   await wrapper.get('[data-testid="config-save"]').trigger('click')
-  expect(wrapper.emitted('save')[0][0]).toMatchObject({ ...initialConfig, enabled: true })
+  expect(wrapper.emitted('save')[0][0]).toMatchObject({ ...initialConfig, enabled: true, auto_new_only: true })
+  expect(wrapper.emitted('save')[0][0].auto_new_only).toBe(true)
 })

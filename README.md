@@ -95,6 +95,8 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 Manko 的原生同步/异步手动搜索会列出所有逐条详情证明了同一番号的不同原生 ID，便于用户在 MoviePilot 手动流程中选择。`recognize_media`、`async_recognize_media` 和自动范围识别仍只接受唯一精确身份；同一番号命中多个不同 ID 时不会替用户选一条。多结果手动搜索不写共享番号缓存；按选定原生 ID 回查仍保持来源和身份校验。
 
+Manko 结果没有封面时，先检查 `image_hosts` 是否包含该结果封面 URL 的实际精确 HTTPS 主机；该设置默认空，空值不会提供图像地址。URL 通过插件校验只表示允许交给宿主，不保证 MoviePilot 下载或落盘成功。当前投影映射有效的标题、简介、日期/年份、演员及获准封面；上游 `video_duration`、`tags`、`imdb_score` 和 `rating` 尚未映射，字段语义待验证后再考虑支持。
+
 ## 宿主 TMDB 辅助补充限制
 
 官方 v3.1.1 原生整理仍会明确调用 `supplement_tmdb_info()`。对应能力是列表聚合且 `plugin_short_circuit=False`，不能靠本插件空返回或取消 SEARCH_SOURCE 阻止。

@@ -24,14 +24,16 @@ from .gfriends import GFriendsProvider, actor_image
 from .handoff import HandoffConfig, HandoffCoordinator
 from .ledger import HandoffLedger, HandoffLedgerError, LedgerFullError
 from app.schemas.types import TorrentStatus
+from .manual import ManualTransferWorkspace
+from .manual_api import api_routes as manual_api_routes
 
 
 class XiaojiejieScraping(_PluginBase):
     """默认关闭；显式来源查询与自动任务发现分离，原生整理仍有辅助补充风险。"""
     plugin_name = "Xiaojiejie-Scraping"
-    plugin_desc = "直连多来源刮削、原生手动来源入口与 qBittorrent 只读发现（实验版）"
+    plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.4"
+    plugin_version = "0.5"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -61,6 +63,7 @@ class XiaojiejieScraping(_PluginBase):
         self._handoff = None
         self._handoff_error = ""
         self._handoff_limit = 1
+        self._manual = None
 
     def init_plugin(self, config: dict | None = None) -> None:
         """每次重载替换实例状态，不联网、不扫描目录、不调度旧记录修复。"""
@@ -85,6 +88,7 @@ class XiaojiejieScraping(_PluginBase):
             self._cache = JsonCache(self.get_data_path() / "metadata-v1.json") if self._enabled else None
             self._journal = DiscoveryJournal(self.get_data_path() / "discovery-v1.json") if self._enabled and self._discovery else None
             self._handoff, self._handoff_error = None, ""
+            self._manual = ManualTransferWorkspace(self, self.get_data_path()) if self._enabled else None
             limit = config.get("handoff_limit", 1)
             self._handoff_limit = min(5, max(1, limit)) if type(limit) is int else 1
             if self._enabled:
@@ -125,6 +129,7 @@ class XiaojiejieScraping(_PluginBase):
             self._journal = None
             self._actor_index = None
             self._handoff = None
+            self._manual = None
 
     def get_service(self) -> list[dict]:
         """宿主管理五分钟轮询；默认只读，整理须另选执行模式及完整权限。"""
@@ -588,8 +593,26 @@ class XiaojiejieScraping(_PluginBase):
         return await asyncio.to_thread(self.obtain_images, mediainfo)
 
     def get_api(self) -> list:
-        """不额外开放外部查询接口。"""
-        return []
+        """为插件独立手动整理页注册管理 API。"""
+        return manual_api_routes(self._manual) if self._enabled and self._manual else []
+
+    @staticmethod
+    def get_render_mode() -> tuple[str, str]:
+        """启用官方 Vue 联邦页面。"""
+        return "vue", "dist/assets"
+
+    def get_sidebar_nav(self) -> list[dict]:
+        """仅向管理员显示插件自有的手动整理页面入口。"""
+        if not self._enabled:
+            return []
+        return [{
+            "nav_key": "manual",
+            "title": "Manko 整理",
+            "icon": "mdi-folder-move",
+            "section": "organize",
+            "permission": "manage",
+            "order": 50,
+        }]
 
     def get_page(self):
         """展示持久交接状态；受理、预览和未知结果不会冒充完成。"""

@@ -1,0 +1,627 @@
+"""有范围的插件手动预览与原生整理入口。"""
+# SPDX-License-Identifier: GPL-3.0-only
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import time
+import uuid
+
+from pydantic import BaseModel, ConfigDict
+from app.sdk.media import MetaInfo
+from app.schemas.file import FileItem
+from app.schemas.system import TransferDirectoryConf
+from app.schemas.types import MediaType
+
+from .core import NUMBER, normalize_number
+from .discovery import VIDEO_EXTENSIONS
+from .handoff import native_transfer, _fingerprint, _target_path
+from .ledger import HandoffLedger, task_key
+
+MAX_SCAN_ENTRIES = 1000
+MAX_VIDEO_FILES = 50
+PREVIEW_TTL = 15 * 60
+
+
+class ManualOptions(BaseModel):
+    enabled: bool
+    sources: list[dict[str, str]]
+    roots: list[str]
+    default_target_path: str | None = None
+    transfer_type: str = "link"
+
+
+class ManualBrowseItem(BaseModel):
+    name: str
+    path: str
+    type: str
+
+
+class ManualBrowse(BaseModel):
+    path: str
+    parent: str | None = None
+    items: list[ManualBrowseItem]
+
+
+class ManualPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+    target_path: str
+    media_source: str
+    transfer_type: str = "link"
+    library_category_folder: bool = False
+
+
+class ManualPreviewItem(BaseModel):
+    source: str
+    target: str | None = None
+    title: str | None = None
+    media_source: str | None = None
+    media_id: str | None = None
+    poster_path: str | None = None
+    success: bool
+    message: str | None = None
+
+
+class ManualSummary(BaseModel):
+    total: int
+    success: int
+    failed: int
+
+
+class ManualPreview(BaseModel):
+    preview_id: str | None = None
+    created_at: float | None = None
+    expires_at: float | None = None
+    items: list[ManualPreviewItem]
+    summary: ManualSummary
+
+
+class ManualExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preview_id: str
+
+
+class ManualExecuteItem(BaseModel):
+    source: str
+    target: str | None = None
+    state: str
+    message: str | None = None
+    completion_scope: str | None = None
+
+
+class ManualExecuteResponse(BaseModel):
+    preview_id: str
+    state: str
+    items: list[ManualExecuteItem]
+    summary: ManualSummary
+    completion_scope: str | None = None
+
+
+def _contained(path: Path, roots: tuple[Path, ...], *, existing: bool = True) -> Path | None:
+    """词法路径、实际路径必须都在同一配置范围内。"""
+    if not path.is_absolute() or ".." in path.parts:
+        return None
+    try:
+        lexical = Path(os.path.normpath(str(path)))
+        actual = path.resolve(strict=existing)
+        for root in roots:
+            resolved_root = root.resolve(strict=True)
+            if lexical.is_relative_to(root) and actual.is_relative_to(resolved_root):
+                return actual
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return None
+
+
+def _target_root(value: str, roots: tuple[Path, ...]) -> Path | None:
+    """目标须为既有本地目录，且不得与任一源根目录重叠。"""
+    raw = Path(value)
+    if not raw.is_absolute() or raw == Path("/") or ".." in raw.parts or not roots:
+        return None
+    try:
+        if Path(os.path.normpath(str(raw))) != raw or raw.resolve(strict=True) != raw:
+            return None
+        target = raw.resolve(strict=True)
+        if not target.is_dir() or target == Path("/"):
+            return None
+        for root in roots:
+            resolved = root.resolve(strict=True)
+            if target.is_relative_to(resolved) or resolved.is_relative_to(target):
+                return None
+        return target
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _directory_identity(path: Path) -> dict[str, int] | None:
+    try:
+        stat = path.stat()
+        if not path.is_dir():
+            return None
+        return {"device": stat.st_dev, "inode": stat.st_ino}
+    except OSError:
+        return None
+
+
+class ManualTransferWorkspace:
+    """服务端保存识别身份和预览意图；客户端只拿不透明预览 ID。"""
+
+    def __init__(self, plugin, data_path: Path, transfer=native_transfer):
+        self.plugin = plugin
+        self.data_path = Path(data_path)
+        self.transfer = transfer
+        self._ledger = None
+        self._boot_id = uuid.uuid4().hex
+
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        with self.plugin._lock:
+            if self.plugin._storage != "local":
+                return ()
+            return tuple(Path(root) for root in self.plugin._dirs)
+
+    def _active(self) -> bool:
+        return bool(self.plugin._enabled and self.plugin._storage == "local")
+
+    def _configured_target(self) -> Path | None:
+        configured = self.plugin._handoff.config.target_path if self.plugin._handoff else ""
+        return _target_root(configured, self.roots) if configured else None
+
+    def _selected_target(self, value: str) -> Path | None:
+        target = _target_root(value, self.roots)
+        configured = self._configured_target()
+        return target if target and configured and target.is_relative_to(configured) else None
+
+    def _config_signature(self) -> str:
+        target = self._configured_target()
+        try:
+            target_stat = target.stat() if target else None
+            target_identity = (
+                {"device": target_stat.st_dev, "inode": target_stat.st_ino}
+                if target_stat else None
+            )
+        except OSError:
+            target_identity = None
+        return task_key({
+            "enabled": self._active(),
+            "storage": self.plugin._storage,
+            "sources": list(self.plugin._active_sources),
+            "roots": [str(root) for root in self.roots],
+            "target": str(target) if target else None,
+            "target_identity": target_identity,
+        })
+
+    def _source_matches(self, intent: dict) -> bool:
+        path = Path(intent["source"])
+        try:
+            return (_contained(path, self.roots) is not None
+                    and _fingerprint(path) == intent["source_stat"])
+        except OSError:
+            return False
+
+    def _target_matches(self, payload: dict, target: Path | None) -> bool:
+        return bool(target and self._selected_target(payload.get("target_root", "")) == target
+                    and _directory_identity(target) == payload.get("selected_target_identity"))
+
+    def _source_names(self) -> list[dict[str, str]]:
+        from .registry import PROVIDERS
+        statuses = {item.key: item.label for item in PROVIDERS}
+        return [{"title": statuses.get(source, source), "value": source}
+                for source in self.plugin._active_sources]
+
+    def options(self) -> ManualOptions:
+        roots = self.roots
+        target_path = self._configured_target()
+        return ManualOptions(enabled=self._active(), sources=self._source_names(),
+                             roots=[str(root) for root in roots],
+                             default_target_path=str(target_path) if target_path else None)
+
+    def _ledger_db(self) -> HandoffLedger:
+        if self._ledger is None:
+            self._ledger = HandoffLedger(self.data_path / "manual-handoff.sqlite3")
+        return self._ledger
+
+    def browse(self, value: str, kind: str) -> ManualBrowse:
+        if kind not in ("source", "target"):
+            raise ValueError("kind 必须是 source 或 target")
+        if not self._active():
+            raise ValueError("插件已禁用或当前仅支持本地存储")
+        roots = self.roots
+        if not roots:
+            raise ValueError("请先在插件设置中配置本地识别目录")
+        if kind == "source":
+            allowed = roots
+            if not value:
+                return ManualBrowse(path="", items=[ManualBrowseItem(name=str(root), path=str(root), type="dir")
+                                                      for root in roots if _contained(root, roots) and root.is_dir()])
+        else:
+            target = self._configured_target()
+            if target is None:
+                raise ValueError("请先在插件设置中配置既有目标目录")
+            allowed = (target,)
+            if not value:
+                value = str(target)
+        path = Path(value)
+        actual = _contained(path, allowed)
+        if actual is None or not actual.is_dir() or path.is_symlink():
+            raise ValueError("目录不存在或超出允许范围")
+        items = []
+        try:
+            for child in sorted(actual.iterdir(), key=lambda item: item.name.casefold()):
+                if child.is_symlink():
+                    continue
+                if child.is_dir() and _contained(child, allowed):
+                    items.append(ManualBrowseItem(name=child.name, path=str(child), type="dir"))
+                elif kind == "source" and child.is_file() and child.suffix.lower() in VIDEO_EXTENSIONS and _contained(child, allowed):
+                    items.append(ManualBrowseItem(name=child.name, path=str(child), type="file"))
+                if len(items) > MAX_SCAN_ENTRIES:
+                    raise ValueError("目录条目超过限制")
+        except OSError as exc:
+            raise ValueError("无法读取该目录") from exc
+        parent = str(actual.parent) if any(actual != root.resolve() for root in allowed) else None
+        return ManualBrowse(path=str(actual), parent=parent, items=items)
+
+    def _scan(self, source: Path) -> tuple[Path, ...]:
+        roots = self.roots
+        actual = _contained(source, roots)
+        if actual is None or source.is_symlink():
+            raise ValueError("源路径不存在或超出配置的识别目录")
+        if actual.is_file():
+            if actual.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise ValueError("仅支持视频文件")
+            return (actual,)
+        if not actual.is_dir():
+            raise ValueError("源路径必须是文件或目录")
+        files: list[Path] = []
+        count = 0
+        for current, directories, filenames in os.walk(actual, followlinks=False):
+            current_path = Path(current)
+            directories[:] = [name for name in directories if not (current_path / name).is_symlink()]
+            count += len(directories) + len(filenames)
+            if count > MAX_SCAN_ENTRIES:
+                raise ValueError("目录超过扫描上限 1000 项")
+            for name in filenames:
+                child = current_path / name
+                if child.is_symlink() or child.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                if _contained(child, roots) is None:
+                    raise ValueError("扫描发现超出识别目录的链接路径")
+                files.append(child.resolve(strict=True))
+                if len(files) > MAX_VIDEO_FILES:
+                    raise ValueError("视频文件超过单次上限 50 个")
+        return tuple(sorted(files, key=lambda item: str(item).casefold()))
+
+    def _number_for(self, path: Path, roots: tuple[Path, ...]) -> str | None:
+        file_numbers = {normalize_number(match.group()) for match in NUMBER.finditer(path.stem)}
+        file_numbers.discard(None)
+        if len(file_numbers) > 1:
+            return None
+        number = next(iter(file_numbers), None)
+        parent_numbers = set()
+        for parent in path.parents:
+            if not any(parent == root.resolve() or parent.is_relative_to(root.resolve()) for root in roots):
+                break
+            found = {normalize_number(match.group()) for match in NUMBER.finditer(parent.name)}
+            found.discard(None)
+            if len(found) > 1:
+                return None
+            if found:
+                parent_numbers.add(next(iter(found)))
+        if number:
+            return None if any(parent_number != number for parent_number in parent_numbers) else number
+        return next(iter(parent_numbers)) if len(parent_numbers) == 1 else None
+
+    @staticmethod
+    def _meta(path: Path, number: str):
+        meta = MetaInfo(path.name)
+        meta.type = MediaType.MOVIE
+        meta.org_string = number
+        meta.begin_season = meta.begin_episode = meta.end_episode = None
+        return meta
+
+    @staticmethod
+    def _value(media, key):
+        value = getattr(media, key, None)
+        return getattr(value, "value", value)
+
+    def _native_request(self, path: Path, target: Path, source: str, number: str, media, preview: bool):
+        meta = self._meta(path, number)
+        media.scrape_source = source
+        fingerprint = _fingerprint(path)
+        fileitem = FileItem(storage="local", path=str(path), type="file", name=path.name,
+                            basename=path.stem, extension=path.suffix.lstrip("."),
+                            size=fingerprint["size"], modify_time=fingerprint["modify_time"])
+        directory = TransferDirectoryConf(
+            name="Xiaojiejie-Scraping 手动整理", library_path=str(target), library_storage="local",
+            transfer_type="link", overwrite_mode="never", renaming=True, scraping=True,
+            notify=False, library_type_folder=False, library_category_folder=False,
+        )
+        return dict(fileitem=fileitem, meta=meta, mediainfo=media, mtype=MediaType.MOVIE,
+                    target_directory=directory, media_source=source, media_id=str(media.media_id),
+                    target_storage="local", target_path=target, transfer_type="link", scrape=True,
+                    library_type_folder=False, library_category_folder=False, background=False,
+                    manual=False, force=False, sync_extra_files=False, preview=preview)
+
+    def preview(self, request: ManualPreviewRequest) -> ManualPreview:
+        if not self._active():
+            raise ValueError("插件已禁用或当前仅支持本地存储")
+        roots = self.roots
+        if not roots:
+            raise ValueError("请先在插件设置中配置本地识别目录")
+        if request.transfer_type != "link" or request.library_category_folder:
+            raise ValueError("首版仅支持硬链接，且不支持按媒体类别建目录")
+        if request.media_source not in self.plugin._active_sources:
+            raise ValueError("所选来源未启用")
+        target = self._selected_target(request.target_path)
+        if target is None:
+            raise ValueError("目标必须位于设置中的既有目标目录内，且不能与源目录重叠")
+        files = self._scan(Path(request.path))
+        now = time.time()
+        preview_id = str(uuid.uuid4())
+        config_signature = self._config_signature()
+        items: list[ManualPreviewItem] = []
+        intents = []
+        for path in files:
+            number = self._number_for(path, roots)
+            if not number:
+                items.append(ManualPreviewItem(source=str(path), success=False,
+                                               message="文件名及允许范围内父目录未提取到唯一番号"))
+                continue
+            if path.stat().st_dev != target.stat().st_dev:
+                items.append(ManualPreviewItem(source=str(path), success=False,
+                                               message="源文件与目标目录不在同一卷，无法创建硬链接"))
+                continue
+            media = self.plugin.recognize_media(meta=self._meta(path, number), mtype=MediaType.MOVIE,
+                                                media_source=request.media_source)
+            if (not media or str(self._value(media, "media_source")) != request.media_source
+                    or not self._value(media, "media_id")):
+                items.append(ManualPreviewItem(source=str(path), success=False,
+                                               message="所选来源未能确认唯一媒体身份"))
+                continue
+            try:
+                success, result = self.transfer(**self._native_request(
+                    path, target, request.media_source, number, media, preview=True))
+            except Exception:
+                success, result = False, None
+            rows = result.get("items") if isinstance(result, dict) else None
+            row = rows[0] if isinstance(rows, list) and len(rows) == 1 else None
+            destination = _target_path(row.get("target"), target) if isinstance(row, dict) else None
+            ok = bool(success is True and row and row.get("success") is True
+                      and row.get("source") == str(path) and row.get("source_storage") == "local"
+                      and destination is not None and destination != path
+                      and not destination.exists() and not destination.is_symlink())
+            items.append(ManualPreviewItem(
+                source=str(path), target=str(destination) if destination else None,
+                title=self._value(media, "title"), media_source=request.media_source,
+                media_id=str(media.media_id), poster_path=self._value(media, "poster_path"),
+                success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标"))
+            if ok:
+                intents.append({"source": str(path), "target": str(destination),
+                                "source_stat": _fingerprint(path), "media_source": request.media_source,
+                                "media_id": str(media.media_id), "number": number,
+                                "config_signature": config_signature})
+        target_groups: dict[str, list[int]] = {}
+        for index, item in enumerate(items):
+            if item.success and item.target:
+                target_groups.setdefault(item.target, []).append(index)
+        duplicates = {path for path, indexes in target_groups.items() if len(indexes) > 1}
+        if duplicates:
+            for index, item in enumerate(items):
+                if item.target in duplicates:
+                    item.success = False
+                    item.message = "多个源文件映射到同一目标，已阻止整个冲突目标"
+            intents = [intent for intent in intents if intent["target"] not in duplicates]
+        if intents:
+            expires = now + PREVIEW_TTL
+            payload = {"kind": "manual_preview", "preview_id": preview_id,
+                       "created_at": now, "expires_at": expires,
+                       "generation": self.plugin._generation, "boot_id": self._boot_id,
+                       "config_signature": config_signature, "target_root": str(target),
+                       "selected_target_identity": _directory_identity(target),
+                       "items": intents}
+            self._ledger_db().claim(preview_id, payload)
+            self._ledger_db().transition(preview_id, ("claimed",), "previewed")
+        else:
+            expires = None
+        return ManualPreview(preview_id=preview_id if intents else None, created_at=now if intents else None,
+                             expires_at=expires, items=items,
+                             summary=ManualSummary(total=len(items), success=sum(i.success for i in items),
+                                                   failed=sum(not i.success for i in items)))
+
+    def _get_preview(self, preview_id: str):
+        record = self._ledger_db().get(preview_id)
+        if not record or record["payload"].get("kind") != "manual_preview":
+            raise ValueError("预览不存在")
+        return record
+
+    def status(self, preview_id: str) -> ManualExecuteResponse:
+        record = self._get_preview(preview_id)
+        state, payload = record["state"], record["payload"]
+        items = []
+        for item in payload["items"]:
+            item_state, message, completion_scope = state, payload.get("result_message"), None
+            key = item.get("intent_key")
+            intent = self._ledger_db().get(key) if key else None
+            if intent:
+                item_state = intent["state"]
+                message = intent["payload"].get("result_message")
+                verified = self._verify_manual_transfer(item, intent)
+                if item_state in ("accepted", "uncertain"):
+                    if verified:
+                        self._ledger_db().transition(key, (item_state,), "completed", {
+                            "completion_scope": "file_transfer",
+                            "result_message": "硬链接已核验；刮削请见原生历史",
+                        })
+                        intent = self._ledger_db().get(key)
+                        item_state = intent["state"]
+                        message = intent["payload"].get("result_message")
+                if item_state == "completed" and verified:
+                    completion_scope = intent["payload"].get("completion_scope")
+                elif item_state == "completed":
+                    item_state = "uncertain"
+                    message = "硬链接回读未通过；请人工核对原生历史"
+            items.append(ManualExecuteItem(source=item["source"], target=item["target"], state=item_state,
+                                           message=message, completion_scope=completion_scope))
+        if items and all(item.state == "completed" and item.completion_scope == "file_transfer" for item in items):
+            if state != "completed":
+                self._ledger_db().transition(preview_id, (state,), "completed", {
+                    "completion_scope": "file_transfer",
+                    "result_message": "所有硬链接已核验；刮削请见原生历史",
+                })
+            state = "completed"
+        elif state == "completed":
+            # Completed must always be backed by a fresh readback of every item.
+            state = "accepted" if any(item.state in ("accepted", "completed") for item in items) else "uncertain"
+        scope = "file_transfer" if state == "completed" else None
+        return ManualExecuteResponse(preview_id=preview_id, state=state, items=items,
+                                     completion_scope=scope,
+                                     summary=ManualSummary(total=len(items),
+                                                           success=sum(i.state in ("accepted", "completed") for i in items),
+                                                           failed=sum(i.state == "failed" for i in items)))
+
+    @staticmethod
+    def _verify_manual_transfer(item: dict, intent: dict) -> bool:
+        """Only confirm a stable regular hard link whose source version still matches."""
+        try:
+            source = Path(item["source"])
+            target = Path(item["target"])
+            source_stat = source.stat(follow_symlinks=False)
+            recorded = intent["payload"]["source_stat"]
+            if (source.is_symlink() or not source.is_file()
+                    or any(getattr(source_stat, attr) != recorded[key] for attr, key in (
+                        ("st_dev", "device"), ("st_ino", "inode"),
+                        ("st_size", "size"), ("st_mtime_ns", "mtime_ns")))):
+                return False
+            root = Path(intent["payload"]["target_root"]).resolve(strict=True)
+            if (not target.is_absolute() or ".." in target.parts or target == root
+                    or not target.is_relative_to(root) or not target.resolve(strict=True).is_relative_to(root)
+                    or target.is_symlink() or not target.is_file()):
+                return False
+            target_stat = target.stat(follow_symlinks=False)
+            return (target_stat.st_dev == source_stat.st_dev and target_stat.st_ino == source_stat.st_ino
+                    and target_stat.st_mode == source_stat.st_mode)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+
+    def execute(self, preview_id: str) -> ManualExecuteResponse:
+        record = self._get_preview(preview_id)
+        if record["state"] != "previewed":
+            return self.status(preview_id)
+        if not self._ledger_db().transition(preview_id, ("previewed",), "preparing"):
+            return self.status(preview_id)
+        payload = record["payload"]
+        now = time.time()
+        target = self._selected_target(payload["target_root"])
+        failed = (not self._active() or not self.roots or not target
+                  or payload.get("generation") != self.plugin._generation
+                  or payload.get("boot_id") != self._boot_id
+                  or payload.get("config_signature") != self._config_signature()
+                  or not self._target_matches(payload, target)
+                  or now >= payload.get("expires_at", 0))
+        if not failed:
+            for intent in payload["items"]:
+                path = Path(intent["source"])
+                if (intent.get("media_source") not in self.plugin._active_sources
+                        or intent.get("config_signature") != payload.get("config_signature")
+                        or not self._source_matches(intent)):
+                    failed = True
+                    break
+                try:
+                    media = self.plugin.recognize_media(meta=self._meta(path, intent["number"]),
+                        mtype=MediaType.MOVIE, media_source=intent["media_source"],
+                        media_id=intent["media_id"], cache=False)
+                    if (not media or str(self._value(media, "media_source")) != intent["media_source"]
+                            or str(self._value(media, "media_id")) != intent["media_id"]):
+                        failed = True
+                        break
+                    preview_ok, preview = self.transfer(**self._native_request(
+                        path, target, intent["media_source"], intent["number"], media, preview=True))
+                    rows = preview.get("items") if isinstance(preview, dict) else None
+                    if (preview_ok is not True or not isinstance(rows, list) or len(rows) != 1
+                            or rows[0].get("success") is not True or rows[0].get("target") != intent["target"]
+                            or Path(intent["target"]).exists() or Path(intent["target"]).is_symlink()):
+                        failed = True
+                        break
+                except Exception:
+                    failed = True
+                    break
+        if failed:
+            self._ledger_db().transition(preview_id, ("preparing",), "failed",
+                                         {"result_message": "预览过期或源文件、配置、身份、目标已变化；未提交"})
+            return self.status(preview_id)
+        file_entries = []
+        for intent in payload["items"]:
+            version = {key: intent["source_stat"][key] for key in ("device", "inode", "size", "mtime_ns")}
+            key = task_key({"kind": "manual_file_intent", "source": intent["source"],
+                            "source_version": version, "media_source": intent["media_source"],
+                            "media_id": intent["media_id"], "target": intent["target"]})
+            intent["intent_key"] = key
+            file_entries.append((key, {"kind": "manual_file_intent", "target_root": str(target), **intent}))
+        if not self._ledger_db().transition(preview_id, ("preparing",), "preparing",
+                                            {"items": payload["items"]}):
+            return self.status(preview_id)
+        try:
+            claimed = self._ledger_db().claim_batch(file_entries)
+        except Exception:
+            claimed = []
+        if len(claimed) != len(file_entries):
+            self._ledger_db().transition(preview_id, ("preparing",), "failed",
+                                         {"result_message": "该文件版本与目标已有提交意图，拒绝重复提交"})
+            return self.status(preview_id)
+        if not self._ledger_db().transition(preview_id, ("preparing",), "submitting",
+                                            {"submitted_at": now, "items": payload["items"]}):
+            return self.status(preview_id)
+        for key, _ in file_entries:
+            if not self._ledger_db().transition(key, ("claimed",), "submitting"):
+                self._ledger_db().transition(preview_id, ("submitting",), "uncertain",
+                                             {"result_message": "文件提交意图状态不一致；禁止自动重试"})
+                return self.status(preview_id)
+        try:
+            for intent in payload["items"]:
+                path = Path(intent["source"])
+                if (not self._active() or payload.get("generation") != self.plugin._generation
+                        or intent["media_source"] not in self.plugin._active_sources
+                        or intent["config_signature"] != self._config_signature()
+                        or payload.get("boot_id") != self._boot_id
+                        or not self._source_matches(intent)
+                        or not self._target_matches(payload, target)
+                        or Path(intent["target"]).exists() or Path(intent["target"]).is_symlink()):
+                    raise RuntimeError("源文件提交前发生变化")
+                media = self.plugin.recognize_media(meta=self._meta(path, intent["number"]),
+                    mtype=MediaType.MOVIE, media_source=intent["media_source"],
+                    media_id=intent["media_id"], cache=False)
+                if (not media or str(self._value(media, "media_source")) != intent["media_source"]
+                        or str(self._value(media, "media_id")) != intent["media_id"]):
+                    raise RuntimeError("提交时原生身份回查不一致")
+                if (payload.get("generation") != self.plugin._generation
+                        or not self._active() or intent["media_source"] not in self.plugin._active_sources
+                        or intent["config_signature"] != self._config_signature()
+                        or not self._source_matches(intent) or not self._target_matches(payload, target)):
+                    raise RuntimeError("提交前插件代次或交接范围已变化")
+                def continue_callback(intent=intent, payload=payload, target=target, path=path,
+                                      generation=payload["generation"]):
+                    return (self._active() and payload.get("generation") == generation
+                            and self.plugin._generation == generation
+                            and intent["media_source"] in self.plugin._active_sources
+                            and payload.get("boot_id") == self._boot_id
+                            and intent["config_signature"] == self._config_signature()
+                            and self._source_matches(intent)
+                            and self._target_matches(payload, target))
+                result = self.transfer(**self._native_request(path, target, intent["media_source"],
+                                                               intent["number"], media, preview=False),
+                                       continue_callback=continue_callback)
+                if not isinstance(result, tuple) or not result or result[0] is not True:
+                    raise RuntimeError("宿主未确认整理请求")
+                self._ledger_db().transition(intent["intent_key"], ("submitting",), "accepted",
+                                             {"result_message": "宿主已收到整理请求"})
+        except Exception:
+            for intent in payload["items"]:
+                self._ledger_db().transition(intent["intent_key"], ("submitting",), "uncertain",
+                                             {"result_message": "结果不确定；永久禁止重复提交"})
+            self._ledger_db().transition(preview_id, ("submitting",), "uncertain",
+                                         {"result_message": "宿主整理结果不确定；不会自动重提"})
+            return self.status(preview_id)
+        self._ledger_db().transition(preview_id, ("submitting",), "accepted",
+                                     {"result_message": "宿主已收到整理请求；实际完成待公开证据核验"})
+        return self.status(preview_id)

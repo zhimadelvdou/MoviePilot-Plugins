@@ -150,3 +150,7 @@ cd /absolute/path/to/MoviePilot-Plugins
 测试使用官方引导、临时 CONFIG_DIR、真实 SDK/模型/SQLite和合成 HTTP/执行回放，收集及执行阶段禁止真实 DNS/socket。未访问真实媒体站点、图片、付费模型、实际下载器或 NAS，未启动生产应用生命周期。没有 GitHub Actions、凭据、宿主改动。
 
 GPL-3.0，完整文本见 [LICENSE](LICENSE)，来源说明见 [NOTICE](NOTICE)。沿用 [hyuan280/JAVRecognize 1.1](https://github.com/hyuan280/MoviePilot-Plugins/tree/main/plugins.v2/javrecognize) 的独立来源/原生整理思路；Manko 编码合同保留原作者署名，其余适配器依据公开协议事实独立编写，未复制 MetaTube 实现。
+
+## 工程技能配置
+
+工程技能配置见 [AGENTS.md](AGENTS.md) 及 [docs/agents/](docs/agents/)；工程 Issue 使用 `.scratch/` 中的本地 Markdown.

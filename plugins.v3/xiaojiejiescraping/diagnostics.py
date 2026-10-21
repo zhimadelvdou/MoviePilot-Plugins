@@ -14,7 +14,8 @@ _REASONS = frozenset({
     "transport_unavailable", "request_exception", "http_response", "http_error",
     "http_redirect", "invalid_json", "payload_invalid", "schema_invalid",
     "search_incomplete", "no_candidates", "candidates", "no_exact_match",
-    "ambiguous_match", "exact_match", "number_evidence_invalid", "actors_invalid",
+    "ambiguous_match", "exact_match", "equivalent_match", "metadata_incomplete",
+    "number_evidence_invalid", "actors_invalid",
 })
 
 

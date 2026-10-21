@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import json
+import math
+from datetime import date
+from urllib.parse import urlsplit
 from .transport import AnonymousAsyncRequestUtils as AsyncRequestUtils, AnonymousRequestUtils as RequestUtils
 from app.sdk.config import settings
 from .core import IDENTIFIER, exact_candidate, normalize_number, record_numbers
@@ -11,6 +14,11 @@ from .diagnostics import diagnose
 
 API = "https://healertanker.com/swx/movie"
 ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"'
+_EQUIVALENT_TRANSPORT_FIELDS = frozenset({
+    "_id", "category_id", "jable_hls", "missav_video", "mmtv_embed",
+    "mmtv_m3u8", "mmtv_time", "njav_player", "upload18_player",
+    "wasabi_embed_url", "wasabi_url_1",
+})
 
 
 def decode_payload(response: dict | None) -> dict:
@@ -124,6 +132,182 @@ class MankoProvider:
         return matches
 
     @staticmethod
+    def _canonical_json(value):
+        """Use JSON type semantics (so True differs from 1) for upstream equality."""
+        def validate(node):
+            if node is None or type(node) in (str, bool, int):
+                return
+            if type(node) is float:
+                if not math.isfinite(node):
+                    raise ValueError("non_finite_number")
+                return
+            if isinstance(node, list):
+                for item in node:
+                    validate(item)
+                return
+            if isinstance(node, dict):
+                if not all(type(key) is str for key in node):
+                    raise TypeError("non_string_key")
+                for item in node.values():
+                    validate(item)
+                return
+            raise TypeError("non_json_value")
+
+        validate(value)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
+
+    @staticmethod
+    def _record_metadata_complete(record):
+        """Require every metadata field that makes automatic equivalence useful."""
+        titles = record.get("title_display_name")
+        has_display_title = isinstance(titles, list) and any(
+            isinstance(item, dict) and isinstance(item.get("title"), str)
+            and item["title"].strip() and isinstance(item.get("language"), str)
+            and item["language"].strip()
+            for item in titles
+        )
+        if not has_display_title and not (isinstance(record.get("title"), str) and record["title"].strip()):
+            return False
+
+        share_date = record.get("share_date")
+        if not isinstance(share_date, str) or len(share_date) < 10:
+            return False
+        try:
+            date.fromisoformat(share_date[:10])
+        except ValueError:
+            return False
+
+        cover = record.get("cover_image")
+        if not isinstance(cover, str) or not cover.strip():
+            return False
+        try:
+            parsed = urlsplit(cover)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                return False
+        except ValueError:
+            return False
+
+        descriptions = record.get("discription")
+        if not isinstance(descriptions, list) or not any(
+            isinstance(item, dict) and isinstance(item.get("overview"), str)
+            and item["overview"].strip() and isinstance(item.get("language"), str)
+            and item["language"].strip()
+            for item in descriptions
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _equivalent_record_data(records):
+        """Compare every raw field except native identity and observed transport fields."""
+        values = []
+        try:
+            for record in records:
+                comparable = {key: value for key, value in record.items()
+                              if key not in _EQUIVALENT_TRANSPORT_FIELDS}
+                values.append(MankoProvider._canonical_json(comparable))
+        except (TypeError, ValueError):
+            diagnose("manko", "search", "schema_invalid")
+            return False
+        return bool(values) and all(value == values[0] for value in values[1:])
+
+    @staticmethod
+    def _complete_actor_list(response):
+        """Return actor data only when its response is valid and not evidently truncated."""
+        if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        actors = response["data"]
+        if len(actors) > 24 or not all(isinstance(actor, dict) for actor in actors):
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        if "total" in response:
+            total = response["total"]
+            if type(total) is not int or total != len(actors):
+                diagnose("manko", "actors", "actors_invalid")
+                return None
+        elif len(actors) == 24:
+            # A full page without a total cannot prove that more actors do not exist.
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        # The observed actor endpoint is keyed by work ID and currently returns the same
+        # set even when size/page change. Treat that response set as the work's actors,
+        # not as proof of a complete upstream actor catalog.
+        if not actors or not all(isinstance(actor.get("name"), str) and actor["name"].strip()
+                                 for actor in actors):
+            diagnose("manko", "search", "metadata_incomplete")
+            return None
+        try:
+            MankoProvider._canonical_json(actors)
+        except (TypeError, ValueError):
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        return actors
+
+    def _equivalent_search_result(self, matches):
+        """Resolve equivalent multi-ID metadata only after strict raw and actor checks."""
+        ordered = sorted(matches.items())
+        records = [record for _, record in ordered]
+        if not all(self._record_metadata_complete(record) for record in records):
+            diagnose("manko", "search", "metadata_incomplete", count=len(records))
+            return None
+        if not self._equivalent_record_data(records):
+            return None
+
+        actor_lists = []
+        for identity, _ in ordered:
+            try:
+                response = self._get("/actors/" + identity, {"size": 24, "page": 1})
+            except Exception:
+                diagnose("manko", "actors", "actors_invalid")
+                actor_lists.append(None)
+                continue
+            actor_lists.append(self._complete_actor_list(response))
+        if any(actors is None for actors in actor_lists):
+            return None
+        try:
+            actor_keys = [self._canonical_json(actors) for actors in actor_lists]
+        except (TypeError, ValueError):
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        if not all(key == actor_keys[0] for key in actor_keys[1:]):
+            return None
+        diagnose("manko", "search", "equivalent_match", count=1)
+        return {"record": ordered[0][1], "actors": actor_lists[0]}
+
+    async def _async_equivalent_search_result(self, matches):
+        """Async counterpart; actor calls stay on the provider's async transport."""
+        ordered = sorted(matches.items())
+        records = [record for _, record in ordered]
+        if not all(self._record_metadata_complete(record) for record in records):
+            diagnose("manko", "search", "metadata_incomplete", count=len(records))
+            return None
+        if not self._equivalent_record_data(records):
+            return None
+
+        actor_lists = []
+        for identity, _ in ordered:
+            try:
+                response = await self._aget("/actors/" + identity, {"size": 24, "page": 1})
+            except Exception:
+                diagnose("manko", "actors", "actors_invalid")
+                actor_lists.append(None)
+                continue
+            actor_lists.append(self._complete_actor_list(response))
+        if any(actors is None for actors in actor_lists):
+            return None
+        try:
+            actor_keys = [self._canonical_json(actors) for actors in actor_lists]
+        except (TypeError, ValueError):
+            diagnose("manko", "actors", "actors_invalid")
+            return None
+        if not all(key == actor_keys[0] for key in actor_keys[1:]):
+            return None
+        diagnose("manko", "search", "equivalent_match", count=1)
+        return {"record": ordered[0][1], "actors": actor_lists[0]}
+
+    @staticmethod
     def _actors(actors):
         if not isinstance(actors, list):
             diagnose("manko", "actors", "actors_invalid")
@@ -176,6 +360,13 @@ class MankoProvider:
             else:
                 diagnose("manko", "search", "invalid_id")
                 return None
+        matches = self._matching_records(details, number)
+        if len(matches) > 1:
+            equivalent = self._equivalent_search_result(matches)
+            if equivalent is None:
+                self._select(details, number)
+                return None
+            return {"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None
@@ -200,6 +391,13 @@ class MankoProvider:
             else:
                 diagnose("manko", "search", "invalid_id")
                 return None
+        matches = self._matching_records(details, number)
+        if len(matches) > 1:
+            equivalent = await self._async_equivalent_search_result(matches)
+            if equivalent is None:
+                self._select(details, number)
+                return None
+            return {"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None

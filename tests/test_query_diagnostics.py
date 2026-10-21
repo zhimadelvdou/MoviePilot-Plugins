@@ -118,7 +118,9 @@ def test_detail_and_match_reasons(messages, replay, sample_payload, asynchronous
         replay.payloads["/detail/fixture_native_123"] = {"data": {"number": "TEST-124"}}
     elif case == "ambiguous":
         replay.payloads["/search"] = {"data": [{"_id": "fixture_native_123"}, {"_id": "second"}], "total": 2}
-        replay.payloads["/detail/second"] = {"data": {**sample_payload["record"], "_id": "second"}}
+        replay.payloads["/detail/second"] = {
+            "data": {**sample_payload["record"], "_id": "second", "title": "TEST-123 different title"}
+        }
     elif case == "wrong_identity":
         replay.payloads["/detail/fixture_native_123"] = {"data": {"_id": PRIVATE}}
     else:

@@ -11,6 +11,7 @@ from .transport import AnonymousAsyncRequestUtils as AsyncRequestUtils, Anonymou
 from app.sdk.config import settings
 from .core import IDENTIFIER, exact_candidate, normalize_number, record_numbers
 from .diagnostics import diagnose
+from .official_metadata import OfficialMetadataProvider
 
 API = "https://healertanker.com/swx/movie"
 ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"'
@@ -58,6 +59,48 @@ class MankoProvider:
     """同步与异步共用校验规则；只发送提取的番号或已知原生 ID。"""
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
+        self._official_metadata = OfficialMetadataProvider(timeout=timeout)
+
+    def _supplement(self, packet: dict, number: str) -> dict:
+        """Add only validated missing fields; official lookup failures are nonfatal."""
+        result = json.loads(json.dumps(packet))
+        try:
+            extra = self._official_metadata.supplement(number)
+        except Exception:
+            return result
+        self._merge_supplement(result, extra)
+        return result
+
+    async def _async_supplement(self, packet: dict, number: str) -> dict:
+        result = json.loads(json.dumps(packet))
+        try:
+            extra = await self._official_metadata.async_supplement(number)
+        except Exception:
+            return result
+        self._merge_supplement(result, extra)
+        return result
+
+    @staticmethod
+    def _merge_supplement(packet: dict, extra: dict | None) -> None:
+        if not isinstance(extra, dict):
+            return
+        record = packet.get("record")
+        if not isinstance(record, dict):
+            return
+        for key in ("directors", "production_companies"):
+            current = record.get(key)
+            if not isinstance(current, list) or not any(isinstance(item, dict) and item.get("name") for item in current):
+                value = extra.get(key)
+                if isinstance(value, list):
+                    record[key] = value
+        source_runtime = record.get("video_duration")
+        fallback_runtime = record.get("runtime_minutes")
+        source_valid = type(source_runtime) is int and 1 <= source_runtime <= 999
+        fallback_valid = type(fallback_runtime) is int and 1 <= fallback_runtime <= 999
+        if not source_valid and not fallback_valid:
+            runtime = extra.get("runtime_minutes")
+            if type(runtime) is int and 1 <= runtime <= 999:
+                record["runtime_minutes"] = runtime
 
     @staticmethod
     def _decode(response, operation):
@@ -326,7 +369,8 @@ class MankoProvider:
             diagnose("manko", "fetch", "number_evidence_invalid")
             return None
         actors = self._get("/actors/" + identity, {"size": 24, "page": 1}).get("data", [])
-        return {"record": record, "number": next(iter(record_numbers(record))), "actors": self._actors(actors)}
+        number = next(iter(record_numbers(record)))
+        return self._supplement({"record": record, "number": number, "actors": self._actors(actors)}, number)
 
     async def async_fetch(self, identity: str) -> dict | None:
         """异步 ID 查询，禁止在事件循环中执行同步 HTTP。"""
@@ -340,7 +384,8 @@ class MankoProvider:
             diagnose("manko", "fetch", "number_evidence_invalid")
             return None
         actors = (await self._aget("/actors/" + identity, {"size": 24, "page": 1})).get("data", [])
-        return {"record": record, "number": next(iter(record_numbers(record))), "actors": self._actors(actors)}
+        number = next(iter(record_numbers(record)))
+        return await self._async_supplement({"record": record, "number": number, "actors": self._actors(actors)}, number)
 
     def search(self, number: str) -> dict | None:
         """核对全部有限候选详情后才返回唯一精确命中。"""
@@ -366,12 +411,12 @@ class MankoProvider:
             if equivalent is None:
                 self._select(details, number)
                 return None
-            return {"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}
+            return self._supplement({"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}, number)
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None
         actors = self._get("/actors/" + selected.get("_id"), {"size": 24, "page": 1}).get("data", [])
-        return {"record": selected, "number": number, "actors": self._actors(actors)}
+        return self._supplement({"record": selected, "number": number, "actors": self._actors(actors)}, number)
 
     async def async_search(self, number: str) -> dict | None:
         """异步搜索保持与同步入口一致的歧义拒绝语义。"""
@@ -397,12 +442,12 @@ class MankoProvider:
             if equivalent is None:
                 self._select(details, number)
                 return None
-            return {"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}
+            return await self._async_supplement({"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}, number)
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None
         actors = (await self._aget("/actors/" + selected.get("_id"), {"size": 24, "page": 1})).get("data", [])
-        return {"record": selected, "number": number, "actors": self._actors(actors)}
+        return await self._async_supplement({"record": selected, "number": number, "actors": self._actors(actors)}, number)
 
     def search_matches(self, number: str) -> list[dict]:
         """为显式手动搜索返回所有逐条精确匹配的不同原生 ID。"""
@@ -430,7 +475,7 @@ class MankoProvider:
         packets = []
         for identity, record in matches.items():
             actors = self._get("/actors/" + identity, {"size": 24, "page": 1}).get("data", [])
-            packets.append({"record": record, "number": number, "actors": self._actors(actors)})
+            packets.append(self._supplement({"record": record, "number": number, "actors": self._actors(actors)}, number))
         return packets
 
     async def async_search_matches(self, number: str) -> list[dict]:
@@ -459,5 +504,5 @@ class MankoProvider:
         packets = []
         for identity, record in matches.items():
             actors = (await self._aget("/actors/" + identity, {"size": 24, "page": 1})).get("data", [])
-            packets.append({"record": record, "number": number, "actors": self._actors(actors)})
+            packets.append(await self._async_supplement({"record": record, "number": number, "actors": self._actors(actors)}, number))
         return packets

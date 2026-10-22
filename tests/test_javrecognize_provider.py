@@ -211,7 +211,7 @@ def test_scoped_pipeline_through_real_provider_and_sdk(replay, monkeypatch, tmp_
         assert len(replay["calls"]) == 3
         document = ET.fromstring(plugin.metadata_nfo(metadata, result))
         assert document.findtext("uniqueid") == "fixture_native_123"
-        assert set(plugin.metadata_img(result)) == {"poster.jpg", "fanart.jpg"}
+        assert set(plugin.metadata_img(result)) == {"poster.jpg"}
         cached = plugin.recognize_scoped(scope_context, media_source="manko", media_id="fixture_native_123")
         assert cached.media_id == result.media_id
         assert len(replay["calls"]) == 3

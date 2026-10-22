@@ -6,6 +6,7 @@ import asyncio
 import copy
 import math
 import time
+from collections import OrderedDict
 from pathlib import Path
 import threading
 from app.sdk.plugin.base import _PluginBase
@@ -13,6 +14,7 @@ from app.sdk.media import MediaInfo
 from app.sdk.services import DownloaderHelper
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
 from .core import SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, project_record, record_numbers, render_nfo
+from .artwork import backdrop_candidates, is_usable_landscape
 from .provider import MankoProvider
 from .diagnostics import diagnose
 from .direct_primary import FANZAProvider, MGStageProvider, DUGAProvider, SODProvider
@@ -38,7 +40,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.0"
+    plugin_version = "0.8.2"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -53,6 +55,8 @@ class XiaojiejieScraping(_PluginBase):
         self._storage = "local"
         self._dirs = ()
         self._image_hosts = ()
+        self._artwork_lock = threading.RLock()
+        self._artwork_cache = OrderedDict()
         self._provider = None
         self._providers = {}
         self._active_sources = (SOURCE,)
@@ -95,13 +99,15 @@ class XiaojiejieScraping(_PluginBase):
             self._actor_images = config.get("actor_images") is True
             self._actor_index = JsonCache(self.get_data_path() / "actors-v1.json", max_entries=1, max_bytes=32 * 1024 * 1024) if self._enabled and self._actor_images else None
             self._image_hosts = tuple(v.lower() for v in self._lines(config.get("image_hosts")))
+            with self._artwork_lock:
+                self._artwork_cache.clear()
             self._provider = MankoProvider() if self._enabled else None
             self._providers = {"fanza": FANZAProvider(), "mgstage": MGStageProvider(), "duga": DUGAProvider(),
                                "sod": SODProvider(), "javbus": JavBusProvider(), "jav321": Jav321Provider(),
                                "fc2hub": FC2HubProvider(), "fc2ppvdb": FC2PPVDBProvider()} if self._enabled else {}
             requested = self._lines(config.get("sources", [SOURCE]))
             self._active_sources = tuple(source for source in requested if source in self._adapters())
-            self._cache = JsonCache(self.get_data_path() / "metadata-v1.json") if self._enabled else None
+            self._cache = JsonCache(self.get_data_path() / "metadata-v2.json") if self._enabled else None
             self._journal = DiscoveryJournal(self.get_data_path() / "discovery-v1.json") if self._enabled and self._discovery else None
             self._handoff, self._handoff_error = None, ""
             self._manual = ManualTransferWorkspace(self, self.get_data_path()) if self._enabled else None
@@ -814,16 +820,61 @@ class XiaojiejieScraping(_PluginBase):
         data = self._owned(mediainfo)
         if not data or season is not None or episode is not None:
             return None
-        return image_map(data["packet"]["record"], self._image_hosts) or None
+        return self._selected_artwork(data) or None
+
+    def _selected_artwork(self, data):
+        """Use one bounded probe result for both host artwork callbacks."""
+        record = data["packet"]["record"]
+        with self._lock:
+            generation = self._generation
+            hosts = self._image_hosts
+        images = image_map(record, hosts)
+        images.pop("fanart.jpg", None)
+        candidates = backdrop_candidates(record, hosts)
+        cover = images.get("poster.jpg", "")
+        key = (generation, tuple(hosts), str(record.get("_source") or SOURCE),
+               str(record.get("_id") or ""), cover, candidates)
+        with self._artwork_lock:
+            if key in self._artwork_cache:
+                selected = self._artwork_cache.pop(key)
+                self._artwork_cache[key] = selected
+                cache_hit = True
+            else:
+                selected = None
+                cache_hit = False
+        if not cache_hit:
+            for candidate in candidates:
+                try:
+                    if is_usable_landscape(candidate):
+                        selected = candidate
+                        break
+                except Exception:
+                    continue
+            with self._lock:
+                current = (self._enabled and generation == self._generation
+                           and hosts == self._image_hosts)
+            if current:
+                with self._artwork_lock:
+                    self._artwork_cache[key] = selected
+                    self._artwork_cache.move_to_end(key)
+                    while len(self._artwork_cache) > 128:
+                        self._artwork_cache.popitem(last=False)
+        with self._lock:
+            if (not self._enabled or generation != self._generation
+                    or hosts != self._image_hosts):
+                return {}
+            if selected:
+                images["fanart.jpg"] = selected
+            return images
 
     def obtain_images(self, mediainfo) -> MediaInfo | None:
         """只补自己的封面字段，不改写其他来源对象。"""
         data = self._owned(mediainfo)
         if not data:
             return None
-        cover = image_map(data["packet"]["record"], self._image_hosts).get("poster.jpg")
-        mediainfo.poster_path = cover
-        mediainfo.backdrop_path = cover
+        images = self._selected_artwork(data)
+        mediainfo.poster_path = images.get("poster.jpg")
+        mediainfo.backdrop_path = images.get("fanart.jpg")
         return mediainfo
 
     async def async_obtain_images(self, mediainfo) -> MediaInfo | None:

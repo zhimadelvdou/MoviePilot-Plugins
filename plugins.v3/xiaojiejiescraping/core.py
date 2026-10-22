@@ -82,15 +82,50 @@ def safe_image_url(value: str, allowed_hosts: tuple[str, ...]) -> str | None:
         return None
 
 
+def safe_backdrop_url(record: dict, allowed_hosts: tuple[str, ...]) -> str | None:
+    """Choose the first approved background URL distinct from the cover."""
+    cover = safe_image_url(record.get("cover_image"), allowed_hosts)
+    backdrops = record.get("backdrop_images")
+    if not isinstance(backdrops, list):
+        return None
+    for item in backdrops:
+        backdrop = safe_image_url(item, allowed_hosts)
+        if backdrop and backdrop != cover:
+            return backdrop
+    return None
+
+
 def image_map(record: dict, allowed_hosts: tuple[str, ...]) -> dict[str, str]:
     """固定输出文件名，不使用服务端路径、标题或演员名。"""
     cover = safe_image_url(record.get("cover_image"), allowed_hosts)
-    return {"poster.jpg": cover, "fanart.jpg": cover} if cover else {}
+    backdrop = safe_backdrop_url(record, allowed_hosts)
+    images = {}
+    if cover:
+        images["poster.jpg"] = cover
+    if backdrop:
+        images["fanart.jpg"] = backdrop
+    return images
 
 
 def clean_text(value: object) -> str:
     """XML 1.0 不允许的控制字符必须移除，转义交给 ElementTree。"""
     return "".join(c for c in str(value or "") if c in "\t\n\r" or "\x20" <= c <= "\ud7ff" or "\ue000" <= c <= "\ufffd" or "\U00010000" <= c <= "\U0010ffff")
+
+
+def _named_entities(value: object) -> list[dict[str, str]]:
+    """Normalize bounded canonical director/company summaries for MediaInfo."""
+    if not isinstance(value, list):
+        return []
+    result, seen = [], set()
+    for item in value[:32]:
+        if (not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                or len(item["name"]) > 200):
+            continue
+        name = clean_text(item["name"]).strip()
+        if name and len(name) <= 200 and name not in seen:
+            result.append({"name": name})
+            seen.add(name)
+    return result
 
 
 def project_record(record: dict, number: str, actors: list[dict], allowed_hosts: tuple[str, ...], source: str = SOURCE) -> dict:
@@ -103,11 +138,20 @@ def project_record(record: dict, number: str, actors: list[dict], allowed_hosts:
     date = str(record.get("share_date") or "")
     date = date[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", date) else ""
     cover = safe_image_url(record.get("cover_image"), allowed_hosts)
+    backdrop = safe_backdrop_url(record, allowed_hosts)
+    runtime = record.get("video_duration")
+    if type(runtime) is not int or not 1 <= runtime <= 999:
+        runtime = record.get("runtime_minutes")
+    if type(runtime) is not int or not 1 <= runtime <= 999:
+        runtime = None
+    directors = _named_entities(record.get("directors"))
+    companies = _named_entities(record.get("production_companies"))
     return {"media_source": source, "media_id": str(record["_id"]), "scrape_source": source,
             "type": "电影", "title": clean_text(title), "original_title": clean_text(title),
             "year": date[:4] or None, "release_date": date or None,
             "overview": clean_text("\n".join(v["overview"] for v in descriptions)),
-            "poster_path": cover, "backdrop_path": cover, "category": "AV",
+            "poster_path": cover, "backdrop_path": backdrop, "runtime": runtime,
+            "directors": directors, "production_companies": companies, "category": "AV",
             "actors": [{"name": clean_text(a.get("name")), "type": "Actor", "profile_path": safe_image_url(a.get("profile_path"), allowed_hosts)} for a in actors if isinstance(a, dict) and a.get("name")],
             "names": [number], "genre_ids": []}
 
@@ -117,9 +161,13 @@ def render_nfo(info: dict, number: str) -> str:
     root = ET.Element("movie")
     for name, value in (("title", info.get("title")), ("originaltitle", info.get("original_title")),
                         ("plot", info.get("overview")), ("year", info.get("year")),
-                        ("premiered", info.get("release_date")), ("num", number)):
+                        ("premiered", info.get("release_date")), ("num", number),
+                        ("runtime", info.get("runtime"))):
         if value:
             ET.SubElement(root, name).text = clean_text(value)
+    for name, key in (("director", "directors"), ("studio", "production_companies")):
+        for item in _named_entities(info.get(key)):
+            ET.SubElement(root, name).text = item["name"]
     ET.SubElement(root, "uniqueid", {"type": clean_text(info.get("media_source") or SOURCE), "default": "true"}).text = clean_text(info["media_id"])
     for actor in info.get("actors", []):
         element = ET.SubElement(root, "actor")

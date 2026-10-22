@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from io import BytesIO
 import inspect
 from pathlib import Path
 
@@ -16,6 +17,52 @@ from app.schemas.types import MediaSource, MediaType
 from app.sdk.media import MediaInfo, MetaInfo
 from app.plugins.xiaojiejiescraping.handoff import native_transfer  # pylint: disable=import-error,no-name-in-module
 from app.runtime.extensions.module.dispatcher import ModuleInvocationDispatcher
+
+
+def _synthetic_png(color, size=(800, 534)):
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+NATIVE_IMAGES = {
+    "https://images.example.test/poster.jpg": _synthetic_png((220, 20, 20), (500, 750)),
+    "https://art.example.test/backdrop.jpg": _synthetic_png((20, 20, 220)),
+}
+
+
+class OfflineImageResponse:
+    status_code = 200
+
+    def __init__(self, content, content_type="image/png"):
+        self.content = content
+        self.headers = {"Content-Type": content_type}
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        return False
+
+    def close(self):
+        self.closed = True
+
+    def iter_content(self, chunk_size=8192):
+        assert chunk_size > 0
+        yield self.content
+
+
+class OfflineImageClient:
+    def __init__(self):
+        self.urls = []
+
+    def stream(self, url, **_kwargs):
+        self.urls.append(url)
+        assert url in NATIVE_IMAGES
+        return OfflineImageResponse(NATIVE_IMAGES[url])
 
 
 class OfflineMankoProvider:
@@ -115,7 +162,13 @@ def plugin_host_context(monkeypatch):
 @pytest.fixture
 def offline_plugin(monkeypatch, tmp_path, sample_payload, plugin_host_context):
     """使用真实 V3 插件构造逻辑和明确的离线 provider 边界。"""
+    from app.plugins.xiaojiejiescraping.transport import AnonymousRequestUtils
+
     monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
+    monkeypatch.setattr(
+        AnonymousRequestUtils, "get_res",
+        lambda _client, _url, **_kwargs: OfflineImageResponse(_synthetic_png((20, 20, 220))),
+    )
     plugin = XiaojiejieScraping()
     plugin.init_plugin({"enabled": True, "image_hosts": []})
     plugin._provider = OfflineMankoProvider(sample_payload)
@@ -203,9 +256,9 @@ def test_native_manual_preview_accepts_plugin_native_identity(offline_plugin, tm
 
 
 def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
-    offline_plugin, tmp_path, request, sample_payload,
+    offline_plugin, tmp_path, request, sample_payload, monkeypatch,
 ):
-    """真实插件 preview→execute/status 经原生链写入硬链接目标与插件 NFO。"""
+    """真实原生链写入插件 NFO 和彼此不同的合成海报/背景图。"""
     import hashlib
     import time
     import xml.etree.ElementTree as ET
@@ -215,8 +268,25 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     source = tmp_path / "downloads" / "TEST-123.mkv"
     source.parent.mkdir()
     source.write_bytes(b"synthetic video bytes; no media decoding")
+    source_nfo = source.with_suffix(".nfo")
+    source_nfo.write_text("<movie><runtime>118</runtime></movie>", encoding="utf-8")
+    source_nfo_before = source_nfo.read_bytes()
     original = source.stat()
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    payload = deepcopy(sample_payload)
+    payload["record"].update({
+        "video_duration": None,
+        "runtime_minutes": 120,
+        "directors": [{"name": "Synthetic Director"}],
+        "production_companies": [{"name": "アタッカーズ"}],
+        "backdrop_images": ["https://art.example.test/backdrop.jpg"],
+        "cover_image": "https://images.example.test/poster.jpg",
+    })
+
+    import app.chain.scraping as scraping_module
+
+    image_client = OfflineImageClient()
+    monkeypatch.setattr(scraping_module, "_scraping_http_snapshot", lambda: image_client)
     library = tmp_path / "library"
     library.mkdir()
     offline_plugin.init_plugin({
@@ -227,9 +297,9 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
         "target_path": str(library),
         "transfer_type": "link",
         "handoff_mode": "discover",
-        "image_hosts": [],
+        "image_hosts": ["images.example.test", "art.example.test"],
     })
-    offline_plugin._provider = OfflineMankoProvider(sample_payload)
+    offline_plugin._provider = OfflineMankoProvider(payload)
     assert offline_plugin._manual is not None
 
     from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
@@ -265,7 +335,8 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     status = offline_plugin._manual.status(preview.preview_id)
     while time.monotonic() < deadline:
         nfo_files = list(expected_target.parent.glob("*.nfo"))
-        if expected_target.exists() and nfo_files and status.state == "completed":
+        image_files = [path for path in expected_target.parent.glob("*.jpg") if path.is_file()]
+        if expected_target.exists() and nfo_files and len(image_files) >= 2 and status.state == "completed":
             break
         status = offline_plugin._manual.status(preview.preview_id)
         time.sleep(0.05)
@@ -292,6 +363,9 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     assert nfo.findtext("title") == "测试 & <合成> \"标题\""
     assert nfo.findtext("year") == "2026"
     assert nfo.findtext("plot") == "Synthetic <plot> & text"
+    assert nfo.findtext("director") == "Synthetic Director"
+    assert nfo.findtext("studio") == "アタッカーズ"
+    assert nfo.findtext("runtime") == "120"
     assert [actor.findtext("name") for actor in nfo.findall("actor")] == [
         "Synthetic <Actor> & Name"
     ]
@@ -300,3 +374,12 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     assert uniqueid.attrib.get("type") == "manko"
     assert uniqueid.text == "fixture_native_123"
     assert nfo.findtext("num") == "TEST-123"
+    assert source_nfo.read_bytes() == source_nfo_before
+    target_images = {path.name: path.read_bytes() for path in target.parent.glob("*.jpg")}
+    assert "poster.jpg" in target_images
+    background_name = "backdrop.jpg" if "backdrop.jpg" in target_images else "fanart.jpg"
+    assert background_name in target_images
+    assert target_images["poster.jpg"] == NATIVE_IMAGES["https://images.example.test/poster.jpg"]
+    assert target_images[background_name] == NATIVE_IMAGES["https://art.example.test/backdrop.jpg"]
+    assert target_images["poster.jpg"] != target_images[background_name]
+    assert set(image_client.urls) == set(NATIVE_IMAGES)

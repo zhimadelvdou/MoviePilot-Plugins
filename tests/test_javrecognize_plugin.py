@@ -1,6 +1,7 @@
 """真实 V3 SDK 下的来源边界、生命周期、缓存和刮削契约。"""
 import asyncio
 from copy import deepcopy
+from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -293,7 +294,69 @@ def test_nfo_uses_verified_cache_despite_host_auxiliary_contamination(plugin, sc
     assert "unverified" not in nfo and "tmdb" not in nfo and "imdb" not in nfo
     assert plugin.metadata_nfo(meta(), result, season=1) is None
     assert plugin.metadata_nfo(meta(), result, episode=1) is None
-    assert set(plugin.metadata_img(result)) == {"poster.jpg", "fanart.jpg"}
+    assert set(plugin.metadata_img(result)) == {"poster.jpg"}
+
+
+def test_metadata_v2_projects_separate_artwork_and_official_fields_into_nfo(plugin, scope_context, monkeypatch):
+    from PIL import Image
+    from app.plugins.xiaojiejiescraping.transport import AnonymousRequestUtils
+
+    class OfflineProbeResponse:
+        status_code = 200
+        headers = {"Content-Type": "image/png"}
+
+        def __init__(self, content):
+            self.content = content
+
+        def iter_content(self, chunk_size):
+            yield self.content
+
+        def close(self):
+            pass
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (800, 534), (20, 20, 220)).save(image_buffer, format="PNG")
+    monkeypatch.setattr(
+        AnonymousRequestUtils, "get_res",
+        lambda _client, _url, **_kwargs: OfflineProbeResponse(image_buffer.getvalue()),
+    )
+
+    legacy_cache = plugin._cache.path.with_name("metadata-v1.json")
+    plugin._cache.__class__(legacy_cache).put("manko:number:TEST-123", {
+        "packet": {"record": {"_id": "fixture_native_123", "number": "TEST-123", "title": "stale legacy"}},
+        "projected": {"title": "stale legacy"},
+    })
+    plugin._provider.payload["record"].update({
+        "video_duration": 120,
+        "directors": [{"name": "Synthetic Director"}],
+        "production_companies": [{"name": "ATTACKERS"}],
+        "backdrop_images": ["https://art.example.test/backdrop.jpg"],
+    })
+    plugin._provider.payload["record"]["cover_image"] = "https://images.example.test/poster.jpg"
+    plugin._image_hosts = ("images.example.test", "art.example.test")
+
+    metadata = SimpleNamespace(org_string="TEST-123 synthetic", type=MediaType.MOVIE)
+    result = plugin.recognize_scoped(scope_context, meta=metadata, media_source="manko", cache=True)
+
+    assert result is not None
+    assert result.runtime == 120
+    assert [item["name"] for item in result.directors] == ["Synthetic Director"]
+    assert [item["name"] for item in result.production_companies] == ["ATTACKERS"]
+    images = plugin.metadata_img(result)
+    assert images == {
+        "poster.jpg": "https://images.example.test/poster.jpg",
+        "fanart.jpg": "https://art.example.test/backdrop.jpg",
+    }
+    plugin.obtain_images(result)
+    assert result.poster_path == images["poster.jpg"]
+    assert result.backdrop_path == images["fanart.jpg"]
+    nfo = ET.fromstring(plugin.metadata_nfo(mediainfo=result))
+    assert [node.text for node in nfo.findall("director")] == ["Synthetic Director"]
+    assert [node.text for node in nfo.findall("studio")] == ["ATTACKERS"]
+    assert nfo.findtext("runtime") == "120"
+    assert plugin._cache.path.name == "metadata-v2.json"
+    assert legacy_cache.exists()
+    assert result.title != "stale legacy"
 
 
 def test_metadata_hooks_ignore_other_sources_without_mutation(plugin, scope_context):

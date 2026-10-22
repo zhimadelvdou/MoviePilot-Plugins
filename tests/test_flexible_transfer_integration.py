@@ -34,6 +34,9 @@ class OfflineImageResponse:
 
     status_code = 200
 
+    def __init__(self, content):
+        self.content = content
+
     def __enter__(self):
         return self
 
@@ -45,17 +48,25 @@ class OfflineImageResponse:
 
     def iter_content(self, *, chunk_size: int):
         assert chunk_size > 0
-        yield IMAGE_PNG
+        yield self.content
 
 
 class OfflineImageClient:
     def __init__(self):
         self.urls = []
+        from PIL import Image
+
+        buffer = BytesIO()
+        Image.new("RGB", (1, 1), (20, 20, 220)).save(buffer, format="PNG")
+        self.images = {
+            "https://images.example.test/poster.png": IMAGE_PNG,
+            "https://art.example.test/backdrop.png": buffer.getvalue(),
+        }
 
     def stream(self, url, **_kwargs):
         self.urls.append(url)
-        assert url == "https://images.example.test/poster.png"
-        return OfflineImageResponse()
+        assert url in self.images
+        return OfflineImageResponse(self.images[url])
 
 
 @pytest.fixture
@@ -195,6 +206,7 @@ def test_tag_match_outside_configured_paths_runs_real_native_hardlink_and_scrape
     target_root = tmp_path / "library"
     target_root.mkdir()
     sample_payload["record"]["cover_image"] = "https://images.example.test/poster.png"
+    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.png"]
     plugin_config = {
         "enabled": True,
         "sources": ["manko"],
@@ -211,7 +223,7 @@ def test_tag_match_outside_configured_paths_runs_real_native_hardlink_and_scrape
         "ownership_ack": True,
         "auxiliary_ack": True,
         "handoff_limit": 1,
-        "image_hosts": ["images.example.test"],
+        "image_hosts": ["images.example.test", "art.example.test"],
     }
     offline_plugin.init_plugin(plugin_config)
     offline_plugin._provider = OfflineMankoProvider(sample_payload)
@@ -265,8 +277,11 @@ def test_tag_match_outside_configured_paths_runs_real_native_hardlink_and_scrape
     image_files = sorted(path.name for path in target.parent.rglob("*") if path.is_file()
                          and path.suffix.lower() in (".jpg", ".png"))
     assert image_files == ["backdrop.jpg", "fanart.jpg", "poster.jpg"]
-    assert all((target.parent / name).read_bytes() == IMAGE_PNG for name in image_files)
-    assert len(image_client.urls) == 3
+    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.png"]
+    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "poster.jpg").read_bytes() != (target.parent / "backdrop.jpg").read_bytes()
+    assert set(image_client.urls) == set(image_client.images)
     assert offline_plugin._dirs == (configured_root,)
 
 
@@ -290,6 +305,7 @@ def test_manual_arbitrary_source_and_target_preview_execute_status_with_images(
     manual_target = tmp_path / "manual-library"
     manual_target.mkdir()
     sample_payload["record"]["cover_image"] = "https://images.example.test/poster.png"
+    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.png"]
     offline_plugin.init_plugin({
         "enabled": True,
         "sources": ["manko"],
@@ -297,7 +313,7 @@ def test_manual_arbitrary_source_and_target_preview_execute_status_with_images(
         "recognize_dirs": [str(auto_root)],
         "handoff_mode": "discover",
         "target_path": str(auto_target),
-        "image_hosts": ["images.example.test"],
+        "image_hosts": ["images.example.test", "art.example.test"],
     })
     offline_plugin._provider = OfflineMankoProvider(sample_payload)
     assert offline_plugin._manual is not None
@@ -351,8 +367,11 @@ def test_manual_arbitrary_source_and_target_preview_execute_status_with_images(
     images = sorted(path for path in target.parent.rglob("*") if path.is_file()
                     and path.suffix.lower() in (".jpg", ".png"))
     assert [path.name for path in images] == ["backdrop.jpg", "fanart.jpg", "poster.jpg"]
-    assert all(path.read_bytes() == IMAGE_PNG for path in images)
-    assert len(image_client.urls) == 3
+    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.png"]
+    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "poster.jpg").read_bytes() != (target.parent / "backdrop.jpg").read_bytes()
+    assert set(image_client.urls) == set(image_client.images)
 
 
 @pytest.mark.parametrize(("source_inside", "download_tags", "expected"), [

@@ -176,9 +176,9 @@ def test_projection_nfo_escapes_text_and_never_fakes_builtin_ids(sample_payload)
 
 def test_image_map_uses_fixed_safe_leaf_names(sample_payload):
     urls = core.image_map(sample_payload["record"], ("images.example.test",))
-    assert set(urls) == {"poster.jpg", "fanart.jpg"}
+    assert set(urls) == {"poster.jpg"}
     assert all(Path(name).name == name for name in urls)
-    assert all(url == sample_payload["record"]["cover_image"] for url in urls.values())
+    assert urls["poster.jpg"] == sample_payload["record"]["cover_image"]
 
 
 @pytest.mark.parametrize("url", [

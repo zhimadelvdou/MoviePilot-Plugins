@@ -6,12 +6,22 @@ import Config from '../src/Config.vue'
 const goodPreview = { preview_id: 'p1', expires_at: 4070908800, items: [{ source: '/src/a.mp4', target: '/dst/a.mp4', title: '影片', media_source: 'manko', media_id: 'ID-123', success: true, message: 'ok' }], summary: { total: 1, success: 1, failed: 0 } }
 const options = { sources: [{ title: 'Manko', value: 'manko' }], roots: ['/downloads'], default_target_path: '/library', transfer_type: 'link', enabled: true }
 const automaticStatus = { enabled: false, mode: 'discover', new_only: true, armed: false, started_at: null, interval_seconds: 300, downloader: 'qb', torrent_tag: 'Manko', roots: ['/downloads'], target_path: '/library', last_poll_at: null, counts: {}, error: '' }
+const initialPluginConfig = { enabled: true, discovery_enabled: false, auto_new_only: true, handoff_mode: 'execute', ownership_ack: true, auxiliary_ack: true, future_setting: { retained: true } }
 const mounted = []
-const setup = (overrides = {}) => {
-  const api = { get: vi.fn(async (url) => url.endsWith('/options') ? options : url.endsWith('/automatic/status') ? automaticStatus : { state: 'completed', items: [], summary: {} }), post: vi.fn(async (url) => url.endsWith('/preview') ? goodPreview : ({ state: 'completed', items: [], summary: {} })) }
+const setup = ({ automaticEnabled = false, newOnly = true } = {}) => {
+  let pluginConfig = { ...initialPluginConfig, auto_new_only: newOnly, discovery_enabled: automaticEnabled }
+  const api = {
+    get: vi.fn(async (url) => url.endsWith('/options') ? options
+      : url.endsWith('/automatic/status') ? { ...automaticStatus, new_only: pluginConfig.auto_new_only, enabled: pluginConfig.discovery_enabled }
+        : url === 'plugin/plugin-x' ? { success: true, message: '', data: { ...pluginConfig } }
+          : { state: 'completed', items: [], summary: {} }),
+    put: vi.fn(async (url, body) => { pluginConfig = { ...body }; return { success: true } }),
+    post: vi.fn(async (url) => url.endsWith('/preview') ? goodPreview : ({ state: 'completed', items: [], summary: {} })),
+    currentPluginConfig: () => ({ ...pluginConfig }),
+  }
   const wrapper = mount(Page, { props: { api, pluginId: 'plugin-x', sourcePluginId: 'source-x' } })
   mounted.push(wrapper)
-  return { api, wrapper, ...overrides }
+  return { api, wrapper }
 }
 const deferred = () => { let resolve; let reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 afterEach(() => { for (const wrapper of mounted.splice(0)) wrapper.unmount(); vi.useRealTimers(); sessionStorage.clear() })
@@ -37,6 +47,102 @@ describe('manual transfer page', () => {
     expect(wrapper.text()).toContain('自动触发已关闭')
     expect(wrapper.text()).toContain('历史完成任务跳过')
     expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('turns automatic triggering on through the full plugin config and confirms server status', async () => {
+    const { api, wrapper } = setup()
+    await flushPromises()
+    await wrapper.get('[data-testid="automatic-toggle"]').setValue(true)
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('plugin/plugin-x')
+    expect(api.put).toHaveBeenCalledWith('plugin/plugin-x', { ...initialPluginConfig, discovery_enabled: true })
+    expect(api.currentPluginConfig()).toEqual({ ...initialPluginConfig, discovery_enabled: true })
+    expect(wrapper.get('[data-testid="automatic-toggle"]').element.checked).toBe(true)
+    expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('已开启')
+    expect(wrapper.text()).toContain('只处理重新开启后完成的下载')
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('describes legacy mode accurately when new-only boundary is disabled', async () => {
+    const { wrapper } = setup({ newOnly: false })
+    await flushPromises()
+    expect(wrapper.text()).toContain('重新开启后也会处理启用前已完成的旧任务')
+    await wrapper.get('[data-testid="automatic-toggle"]').setValue(true)
+    await flushPromises()
+    expect(wrapper.text()).toContain('会包含启用前已完成的旧任务')
+    expect(wrapper.text()).not.toContain('只处理重新开启后完成的下载')
+  })
+
+  it.each([
+    ['business error', { success: false, message: 'config unavailable', data: initialPluginConfig }],
+    ['missing data', { success: true, message: '' }],
+    ['null data', { success: true, message: '', data: null }],
+    ['array data', { success: true, message: '', data: [] }],
+    ['partial config', { success: true, message: '', data: { enabled: true } }],
+  ])('does not write when plugin config envelope is invalid (%s)', async (_case, payload) => {
+    const { api, wrapper } = setup()
+    const get = api.get.getMockImplementation()
+    api.get.mockImplementation(url => url === 'plugin/plugin-x' ? payload : get(url))
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="automatic-toggle"]')
+    await toggle.setValue(true)
+    await flushPromises()
+    expect(api.put).not.toHaveBeenCalled()
+    expect(toggle.element.checked).toBe(false)
+    expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('已关闭')
+    expect(wrapper.get('[data-testid="automatic-toggle-message"]').text()).toContain('保存未确认')
+  })
+
+  it('turns automatic triggering off without changing mode or accepted work', async () => {
+    const { api, wrapper } = setup({ automaticEnabled: true })
+    await flushPromises()
+    await wrapper.get('[data-testid="automatic-toggle"]').setValue(false)
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('plugin/plugin-x', { ...initialPluginConfig, discovery_enabled: false })
+    expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('已关闭')
+    expect(wrapper.text()).toContain('已受理的整理不会取消')
+    expect(wrapper.text()).toContain('自动触发已关闭')
+  })
+
+  it('locks the switch and status/condition refresh while saving and prevents duplicate writes', async () => {
+    const { api, wrapper } = setup()
+    const pending = deferred()
+    const save = api.put.getMockImplementation()
+    api.put.mockImplementation(async (...args) => { await pending.promise; return save(...args) })
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="automatic-toggle"]')
+    await toggle.setValue(true)
+    await flushPromises()
+    expect(toggle.element.checked).toBe(false)
+    expect(toggle.element.disabled).toBe(true)
+    expect(wrapper.get('[data-testid="automatic-refresh"]').element.disabled).toBe(true)
+    expect(wrapper.get('[data-testid="automatic-check"]').element.disabled).toBe(true)
+    await toggle.trigger('change')
+    expect(api.put).toHaveBeenCalledTimes(1)
+    pending.resolve()
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports an unconfirmed timeout when read-only status readback also fails', async () => {
+    const { api, wrapper } = setup()
+    const get = api.get.getMockImplementation()
+    let statusReads = 0
+    api.get.mockImplementation(async url => {
+      if (url.endsWith('/automatic/status') && ++statusReads > 1) throw new Error('unavailable')
+      return get(url)
+    })
+    api.put.mockRejectedValue(new Error('timeout'))
+    await flushPromises()
+    await wrapper.get('[data-testid="automatic-toggle"]').setValue(true)
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledTimes(1)
+    expect(statusReads).toBe(2)
+    expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('状态未知')
+    expect(wrapper.get('[data-testid="automatic-toggle"]').element.disabled).toBe(true)
+    expect(wrapper.get('[data-testid="automatic-toggle-message"]').text()).toContain('保存未确认；状态未知')
+    expect(wrapper.text()).not.toContain('自动触发已开启。')
+    expect(wrapper.text()).not.toContain('重新开启后也会处理启用前已完成的旧任务')
   })
 
   it('shows armed automatic mode and its backend start time', async () => {

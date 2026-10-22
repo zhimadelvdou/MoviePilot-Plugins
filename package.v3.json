@@ -3,7 +3,7 @@
     "name": "Xiaojiejie-Scraping",
     "description": "直连多来源刮削：插件独立手动整理页、qBittorrent 标签/目录触发、预览与安全持久原生交接",
     "labels": "识别,刮削",
-    "version": "0.6",
+    "version": "0.7.1",
     "icon": "",
     "author": "zhimadelvdou（基于 hyuan280 方案重写）",
     "level": 1,
@@ -11,6 +11,8 @@
     "release": true,
     "system_version": ">=3.1.1,<4",
     "history": {
+      "v0.7.1": "修正自动触发开关读取宿主配置响应封装；校验完整配置后才写回 discovery_enabled",
+      "v0.7": "独立页面增加自动触发开关；完整读取插件配置后仅更新 discovery_enabled，并以服务端状态回读确认",
       "v0.6": "新增自动触发新任务边界、只读状态/条件检查 API；只接收启用边界之后完成的 qBittorrent 任务",
       "v0.5": "新增插件 Vue 手动整理页：在配置目录范围内按文件名或父目录识别，先预览并确认后调用原生硬链接整理；服务端持久保存意图并防止重复提交",
       "v0.4": "Manko 自动搜索仅在完整原始元数据及演员完全等价时按原生 ID 稳定选择；其它多身份结果仍拒绝，手动搜索继续展示全部精确身份",

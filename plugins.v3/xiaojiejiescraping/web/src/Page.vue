@@ -23,6 +23,8 @@ const automaticStatus = ref(null)
 const automaticStatusBusy = ref(false)
 const automaticCheckBusy = ref(false)
 const automaticCheckMessage = ref('')
+const automaticToggleBusy = ref(false)
+const automaticToggleMessage = ref('')
 let requestGeneration = 0
 let clockTimer
 const previewExpiryMs = computed(() => {
@@ -46,6 +48,13 @@ const formLocked = computed(() => busy.value || executionLocked.value)
 const canExecute = computed(() => !!preview.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && confirmed.value && !busy.value && !previewBusy.value && outcome.value === '')
 const endpoint = (name) => `plugin/${props.pluginId}/manual/${name}`
 const automaticEndpoint = (name) => `plugin/${props.pluginId}/automatic/${name}`
+const pluginConfigEndpoint = () => `plugin/${props.pluginId}`
+const automaticToggleDisabled = computed(() => automaticToggleBusy.value || automaticStatusBusy.value
+  || automaticCheckBusy.value || typeof automaticStatus.value?.enabled !== 'boolean')
+const automaticStatusLabel = computed(() => {
+  if (typeof automaticStatus.value?.enabled !== 'boolean') return '状态未知'
+  return automaticStatus.value.enabled ? '已开启' : '已关闭'
+})
 const storageKey = () => `xiaojiejiescraping:manual-pending:${props.pluginId}`
 const automaticModeLabel = computed(() => {
   if (!automaticStatus.value) return '状态未获取'
@@ -208,12 +217,14 @@ function formatAutomaticTime(value) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : '时间未知'
 }
 async function loadAutomaticStatus() {
+  if (automaticToggleBusy.value) return
   automaticStatusBusy.value = true
   try { automaticStatus.value = await props.api.get(automaticEndpoint('status')) }
   catch { automaticStatus.value = null }
   finally { automaticStatusBusy.value = false }
 }
 async function checkAutomaticConditions() {
+  if (automaticToggleBusy.value) return
   automaticCheckBusy.value = true
   automaticCheckMessage.value = ''
   try {
@@ -223,6 +234,59 @@ async function checkAutomaticConditions() {
     else automaticCheckMessage.value = '检查已完成；条件结果未返回。'
   } catch { automaticCheckMessage.value = '触发条件检查暂不可用。' }
   finally { automaticCheckBusy.value = false }
+}
+async function readAutomaticStatus() {
+  const status = await props.api.get(automaticEndpoint('status'))
+  if (typeof status?.enabled !== 'boolean') throw new Error('automatic status unavailable')
+  automaticStatus.value = status
+  return status
+}
+function readPluginConfigResponse(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('plugin config unavailable')
+  const owns = (key) => Object.prototype.hasOwnProperty.call(payload, key)
+  const isEnvelope = owns('success') || owns('message') || owns('data')
+  if (isEnvelope) {
+    if (payload.success !== true) throw new Error('plugin config request failed')
+    payload = payload.data
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || typeof payload.enabled !== 'boolean' || typeof payload.discovery_enabled !== 'boolean') {
+    throw new Error('plugin config unavailable')
+  }
+  return payload
+}
+async function setAutomaticEnabled(event) {
+  const desired = event?.target?.checked === true
+  if (event?.target) event.target.checked = automaticStatus.value?.enabled === true
+  if (automaticToggleDisabled.value || desired === automaticStatus.value?.enabled) return
+  automaticToggleBusy.value = true
+  automaticToggleMessage.value = ''
+  let readbackAttempted = false
+  try {
+    const config = readPluginConfigResponse(await props.api.get(pluginConfigEndpoint()))
+    const response = await props.api.put(pluginConfigEndpoint(), { ...config, discovery_enabled: desired })
+    if (response?.success !== true) throw new Error('plugin config update failed')
+    readbackAttempted = true
+    const status = await readAutomaticStatus()
+    if (status.enabled !== desired) {
+      automaticToggleMessage.value = '配置已提交，但服务端状态未达到所选状态；请检查插件总开关和本地存储设置。'
+    } else {
+      automaticToggleMessage.value = desired
+        ? (status.new_only === true ? '自动触发已开启；只处理重新开启后完成的下载。' : status.new_only === false ? '自动触发已开启；会包含启用前已完成的旧任务。' : '自动触发已开启；任务边界状态未返回。')
+        : '自动触发已关闭；已受理的整理不会取消。'
+    }
+  } catch {
+    if (readbackAttempted) automaticStatus.value = null
+    else {
+      try { await readAutomaticStatus() }
+      catch { automaticStatus.value = null }
+    }
+    automaticToggleMessage.value = typeof automaticStatus.value?.enabled === 'boolean'
+      ? `保存未确认；回读状态为${automaticStatus.value.enabled ? '已开启' : '已关闭'}。`
+      : '保存未确认；状态未知，请稍后刷新状态。'
+  } finally {
+    automaticToggleBusy.value = false
+  }
 }
 onMounted(async () => {
   clockTimer = setInterval(() => { now.value = Date.now() }, 500)
@@ -237,7 +301,8 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
   <main class="manual-page">
     <header><div><p class="eyebrow">MANUAL LIBRARY TRANSFER</p><h1>手动识别与整理</h1><p>选择已有目录，预览识别结果后再确认整理。源文件会保留。</p></div><button data-testid="reload-options" :disabled="formLocked" @click="loadOptions">重新加载</button></header>
     <section class="panel auto-panel" data-testid="automatic-status">
-      <div class="section-title"><div><h2>自动触发</h2><p>按已配置的 qBittorrent 下载器和标签检查下载完成任务。</p></div><button data-testid="automatic-refresh" :disabled="automaticStatusBusy" @click="loadAutomaticStatus">只读刷新状态</button></div>
+      <div class="section-title"><div><h2>自动触发</h2><p>按已配置的 qBittorrent 下载器和标签检查下载完成任务。</p></div><div class="automatic-toggle"><label class="automatic-switch"><input data-testid="automatic-toggle" type="checkbox" role="switch" aria-label="自动触发" :checked="automaticStatus?.enabled === true" :disabled="automaticToggleDisabled" @change="setAutomaticEnabled($event)"><span>自动触发</span></label><strong data-testid="automatic-toggle-state">{{ automaticStatusLabel }}</strong></div><button data-testid="automatic-refresh" :disabled="automaticStatusBusy || automaticToggleBusy" @click="loadAutomaticStatus">只读刷新状态</button></div>
+      <p class="muted">关闭后不会取消已受理的整理；<template v-if="automaticStatus?.new_only === true">重新开启后只处理之后完成的下载。</template><template v-else-if="automaticStatus?.new_only === false">重新开启后也会处理启用前已完成的旧任务。</template></p>
       <p v-if="!automaticStatus" class="muted">自动触发状态未获取；手动识别与预览仍可使用。</p>
       <template v-else>
         <p><strong>{{ automaticModeLabel }}</strong><span> · {{ automaticStatus.armed ? '已启动' : '未启动' }}</span><span v-if="automaticStatus.started_at"> · 启动于 {{ formatAutomaticTime(automaticStatus.started_at) }}</span></p>
@@ -246,7 +311,7 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <p v-if="automaticCounts.length" class="count-list">计数：<span v-for="([key, value]) in automaticCounts" :key="key">{{ key }} {{ value }} · </span></p>
         <p v-if="automaticStatus.error" class="error">{{ automaticStatus.error }}</p>
       </template>
-      <div class="automatic-actions"><button data-testid="automatic-check" :disabled="automaticCheckBusy" @click="checkAutomaticConditions">{{ automaticCheckBusy ? '检查中…' : '检查触发条件（只读）' }}</button><span v-if="automaticCheckMessage" class="muted">{{ automaticCheckMessage }}</span></div>
+      <div class="automatic-actions"><button data-testid="automatic-check" :disabled="automaticCheckBusy || automaticToggleBusy" @click="checkAutomaticConditions">{{ automaticCheckBusy ? '检查中…' : '检查触发条件（只读）' }}</button><span v-if="automaticCheckMessage" class="muted">{{ automaticCheckMessage }}</span><span v-if="automaticToggleMessage" data-testid="automatic-toggle-message" class="muted">{{ automaticToggleMessage }}</span></div>
     </section>
     <p v-if="!options?.enabled && options" class="notice">此功能当前不可用。</p>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
@@ -268,5 +333,5 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 </template>
 
 <style scoped>
-.manual-page{box-sizing:border-box;min-height:100vh;max-width:1120px;margin:0 auto;padding:28px;color:#17232d;background:#f5f8f7;font:15px/1.5 system-ui,sans-serif}.manual-page *{box-sizing:border-box}header,.section-title,.actions,.path-row{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:22px}h1,h2{color:#17232d}h1{margin:0;font-size:28px}h2{margin:0;font-size:19px}.eyebrow{color:#638078;font-size:11px;letter-spacing:.14em}.panel{padding:22px;border:1px solid #dce5e3;border-radius:14px;background:#fff;margin:16px 0;box-shadow:0 5px 20px #1231}.auto-panel p{margin:8px 0}.automatic-details{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:14px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}.automatic-actions{display:flex;align-items:center;gap:12px}.count-list{color:#667874}.fields{display:grid;gap:18px}.fields label{display:grid;gap:7px;font-weight:600}.path-row input,select{width:100%;min-width:0;padding:10px;border:1px solid #bdcbc8;border-radius:7px;font:inherit}.path-row input{flex:1}button{border:1px solid #b8c8c4;background:#fff;border-radius:7px;padding:9px 13px;color:inherit;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#176b5f;border-color:#176b5f;color:#fff}.muted{color:#667874}.notice{color:#805a12}.error{color:#a33434}.valid{color:#15704e}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e4ecea;overflow-wrap:anywhere}.confirm{display:flex;gap:9px;align-items:flex-start;margin:18px 0}.overlay{position:fixed;inset:0;background:#10201c77;display:grid;place-items:center;padding:18px}.browser{width:min(680px,100%);max-height:80vh;overflow:auto;background:#fff;border-radius:14px;padding:20px}.browser header{margin:0}.current-path{overflow-wrap:anywhere;color:#667874}.root-list{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}li{margin:5px 0}
+.manual-page{box-sizing:border-box;min-height:100vh;max-width:1120px;margin:0 auto;padding:28px;color:#17232d;background:#f5f8f7;font:15px/1.5 system-ui,sans-serif}.manual-page *{box-sizing:border-box}header,.section-title,.actions,.path-row{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:22px}h1,h2{color:#17232d}h1{margin:0;font-size:28px}h2{margin:0;font-size:19px}.eyebrow{color:#638078;font-size:11px;letter-spacing:.14em}.panel{padding:22px;border:1px solid #dce5e3;border-radius:14px;background:#fff;margin:16px 0;box-shadow:0 5px 20px #1231}.auto-panel p{margin:8px 0}.automatic-details{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:14px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}.automatic-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.automatic-toggle{display:flex;align-items:center;gap:12px;white-space:nowrap}.automatic-switch{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}.automatic-switch input{appearance:none;position:relative;width:38px;height:22px;margin:0;border:0;border-radius:999px;background:#9eaaa7;cursor:pointer;transition:background .15s}.automatic-switch input::before{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0004;transition:transform .15s}.automatic-switch input:checked{background:#176b5f}.automatic-switch input:checked::before{transform:translateX(16px)}.automatic-switch input:focus-visible{outline:3px solid #88bdb4;outline-offset:2px}.automatic-switch input:disabled{cursor:not-allowed;opacity:.55}.count-list{color:#667874}.fields{display:grid;gap:18px}.fields label{display:grid;gap:7px;font-weight:600}.path-row input,select{width:100%;min-width:0;padding:10px;border:1px solid #bdcbc8;border-radius:7px;font:inherit}.path-row input{flex:1}button{border:1px solid #b8c8c4;background:#fff;border-radius:7px;padding:9px 13px;color:inherit;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#176b5f;border-color:#176b5f;color:#fff}.muted{color:#667874}.notice{color:#805a12}.error{color:#a33434}.valid{color:#15704e}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e4ecea;overflow-wrap:anywhere}.confirm{display:flex;gap:9px;align-items:flex-start;margin:18px 0}.overlay{position:fixed;inset:0;background:#10201c77;display:grid;place-items:center;padding:18px}.browser{width:min(680px,100%);max-height:80vh;overflow:auto;background:#fff;border-radius:14px;padding:20px}.browser header{margin:0}.current-path{overflow-wrap:anywhere;color:#667874}.root-list{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}li{margin:5px 0}
 </style>

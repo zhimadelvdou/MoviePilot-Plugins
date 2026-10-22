@@ -114,24 +114,34 @@ def _contained(path: Path, roots: tuple[Path, ...], *, existing: bool = True) ->
     return None
 
 
-def _target_root(value: str, roots: tuple[Path, ...]) -> Path | None:
-    """目标须为既有本地目录，且不得与任一源根目录重叠。"""
+def _local_path(value: str, *, directory: bool | None = None) -> Path | None:
+    """解析用户在手动流程中明确选定的既有本地路径。"""
     raw = Path(value)
-    if not raw.is_absolute() or raw == Path("/") or ".." in raw.parts or not roots:
+    if not raw.is_absolute() or ".." in raw.parts:
         return None
     try:
-        if Path(os.path.normpath(str(raw))) != raw or raw.resolve(strict=True) != raw:
+        if Path(os.path.normpath(str(raw))) != raw or raw.resolve(strict=True) != raw or raw.is_symlink():
             return None
-        target = raw.resolve(strict=True)
-        if not target.is_dir() or target == Path("/"):
+        actual = raw.resolve(strict=True)
+        if directory is True and not actual.is_dir():
             return None
-        for root in roots:
-            resolved = root.resolve(strict=True)
-            if target.is_relative_to(resolved) or resolved.is_relative_to(target):
-                return None
-        return target
+        if directory is False and not actual.is_file():
+            return None
+        return actual
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _target_root(value: str, source_roots: tuple[Path, ...] = ()) -> Path | None:
+    """目标是既有本地目录，并与本次手动选择的源范围互不重叠。"""
+    target = _local_path(value, directory=True)
+    if target is None or target == Path("/"):
+        return None
+    for root in source_roots:
+        resolved = root.resolve(strict=True)
+        if target.is_relative_to(resolved) or resolved.is_relative_to(target):
+            return None
+    return target
 
 
 def _directory_identity(path: Path) -> dict[str, int] | None:
@@ -168,40 +178,31 @@ class ManualTransferWorkspace:
         configured = self.plugin._handoff.config.target_path if self.plugin._handoff else ""
         return _target_root(configured, self.roots) if configured else None
 
-    def _selected_target(self, value: str) -> Path | None:
-        target = _target_root(value, self.roots)
-        configured = self._configured_target()
-        return target if target and configured and target.is_relative_to(configured) else None
+    def _selected_target(self, value: str, source_roots: tuple[Path, ...] = ()) -> Path | None:
+        return _target_root(value, source_roots)
 
     def _config_signature(self) -> str:
-        target = self._configured_target()
-        try:
-            target_stat = target.stat() if target else None
-            target_identity = (
-                {"device": target_stat.st_dev, "inode": target_stat.st_ino}
-                if target_stat else None
-            )
-        except OSError:
-            target_identity = None
         return task_key({
             "enabled": self._active(),
             "storage": self.plugin._storage,
             "sources": list(self.plugin._active_sources),
-            "roots": [str(root) for root in self.roots],
-            "target": str(target) if target else None,
-            "target_identity": target_identity,
         })
 
     def _source_matches(self, intent: dict) -> bool:
         path = Path(intent["source"])
+        source_root = Path(intent["source_root"])
+        roots = (source_root,)
         try:
-            return (_contained(path, self.roots) is not None
+            return (not source_root.is_symlink() and source_root.resolve(strict=True) == source_root
+                    and _contained(path, roots) is not None
+                    and _directory_identity(source_root) == intent.get("source_root_identity")
                     and _fingerprint(path) == intent["source_stat"])
         except OSError:
             return False
 
     def _target_matches(self, payload: dict, target: Path | None) -> bool:
-        return bool(target and self._selected_target(payload.get("target_root", "")) == target
+        source_roots = tuple(Path(item["source_root"]) for item in payload.get("items", []))
+        return bool(target and self._selected_target(payload.get("target_root", ""), source_roots) == target
                     and _directory_identity(target) == payload.get("selected_target_identity"))
 
     def _source_names(self) -> list[dict[str, str]]:
@@ -228,45 +229,49 @@ class ManualTransferWorkspace:
         if not self._active():
             raise ValueError("插件已禁用或当前仅支持本地存储")
         roots = self.roots
-        if not roots:
-            raise ValueError("请先在插件设置中配置本地识别目录")
         if kind == "source":
-            allowed = roots
             if not value:
-                return ManualBrowse(path="", items=[ManualBrowseItem(name=str(root), path=str(root), type="dir")
-                                                      for root in roots if _contained(root, roots) and root.is_dir()])
+                value = str(Path("/"))
         else:
-            target = self._configured_target()
-            if target is None:
-                raise ValueError("请先在插件设置中配置既有目标目录")
-            allowed = (target,)
             if not value:
-                value = str(target)
-        path = Path(value)
-        actual = _contained(path, allowed)
-        if actual is None or not actual.is_dir() or path.is_symlink():
-            raise ValueError("目录不存在或超出允许范围")
+                value = str(self._configured_target() or Path("/"))
+        actual = _local_path(value, directory=True)
+        if actual is None:
+            raise ValueError("目录不存在或不是本地规范路径")
         items = []
         try:
             for child in sorted(actual.iterdir(), key=lambda item: item.name.casefold()):
                 if child.is_symlink():
                     continue
-                if child.is_dir() and _contained(child, allowed):
+                child_path = _local_path(str(child), directory=True)
+                if child_path:
                     items.append(ManualBrowseItem(name=child.name, path=str(child), type="dir"))
-                elif kind == "source" and child.is_file() and child.suffix.lower() in VIDEO_EXTENSIONS and _contained(child, allowed):
+                elif kind == "source" and _local_path(str(child), directory=False) and child.suffix.lower() in VIDEO_EXTENSIONS:
                     items.append(ManualBrowseItem(name=child.name, path=str(child), type="file"))
                 if len(items) > MAX_SCAN_ENTRIES:
                     raise ValueError("目录条目超过限制")
         except OSError as exc:
             raise ValueError("无法读取该目录") from exc
-        parent = str(actual.parent) if any(actual != root.resolve() for root in allowed) else None
+        parent = str(actual.parent) if actual != Path("/") else None
         return ManualBrowse(path=str(actual), parent=parent, items=items)
 
-    def _scan(self, source: Path) -> tuple[Path, ...]:
-        roots = self.roots
+    @staticmethod
+    def _source_scope(source: Path) -> tuple[Path, tuple[Path, ...]]:
+        actual = _local_path(str(source))
+        if actual is None or actual == Path("/"):
+            raise ValueError("源路径不存在或不是可选的本地路径")
+        if actual.is_file():
+            if actual.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise ValueError("仅支持视频文件")
+            return actual, (actual.parent,)
+        if actual.is_dir():
+            return actual, (actual,)
+        raise ValueError("源路径必须是文件或目录")
+
+    def _scan(self, source: Path, roots: tuple[Path, ...]) -> tuple[Path, ...]:
         actual = _contained(source, roots)
-        if actual is None or source.is_symlink():
-            raise ValueError("源路径不存在或超出配置的识别目录")
+        if actual is None:
+            raise ValueError("源路径不存在或不是本次选择的本地范围")
         if actual.is_file():
             if actual.suffix.lower() not in VIDEO_EXTENSIONS:
                 raise ValueError("仅支持视频文件")
@@ -346,24 +351,24 @@ class ManualTransferWorkspace:
     def preview(self, request: ManualPreviewRequest) -> ManualPreview:
         if not self._active():
             raise ValueError("插件已禁用或当前仅支持本地存储")
-        roots = self.roots
-        if not roots:
-            raise ValueError("请先在插件设置中配置本地识别目录")
         if request.transfer_type != "link" or request.library_category_folder:
             raise ValueError("首版仅支持硬链接，且不支持按媒体类别建目录")
         if request.media_source not in self.plugin._active_sources:
             raise ValueError("所选来源未启用")
-        target = self._selected_target(request.target_path)
+        source, source_roots = self._source_scope(Path(request.path))
+        target = self._selected_target(request.target_path, source_roots)
         if target is None:
-            raise ValueError("目标必须位于设置中的既有目标目录内，且不能与源目录重叠")
-        files = self._scan(Path(request.path))
+            raise ValueError("目标必须是独立的既有本地目录，且不能与本次所选源范围重叠")
+        if not source_roots or _directory_identity(target) is None:
+            raise ValueError("源和目标必须是既有本地路径")
+        files = self._scan(source, source_roots)
         now = time.time()
         preview_id = str(uuid.uuid4())
         config_signature = self._config_signature()
         items: list[ManualPreviewItem] = []
         intents = []
         for path in files:
-            number = self._number_for(path, roots)
+            number = self._number_for(path, source_roots)
             if not number:
                 items.append(ManualPreviewItem(source=str(path), success=False,
                                                message="文件名及允许范围内父目录未提取到唯一番号"))
@@ -398,7 +403,9 @@ class ManualTransferWorkspace:
                 success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标"))
             if ok:
                 intents.append({"source": str(path), "target": str(destination),
-                                "source_stat": _fingerprint(path), "media_source": request.media_source,
+                                "source_stat": _fingerprint(path), "source_root": str(source_roots[0]),
+                                "source_root_identity": _directory_identity(source_roots[0]),
+                                "media_source": request.media_source,
                                 "media_id": str(media.media_id), "number": number,
                                 "config_signature": config_signature})
         target_groups: dict[str, list[int]] = {}
@@ -513,7 +520,7 @@ class ManualTransferWorkspace:
         payload = record["payload"]
         now = time.time()
         target = self._selected_target(payload["target_root"])
-        failed = (not self._active() or not self.roots or not target
+        failed = (not self._active() or not target
                   or payload.get("generation") != self.plugin._generation
                   or payload.get("boot_id") != self._boot_id
                   or payload.get("config_signature") != self._config_signature()

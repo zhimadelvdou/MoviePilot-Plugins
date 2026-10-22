@@ -654,7 +654,8 @@ def integrated(handoff, tmp_path, monkeypatch):
 
     def raw_completed(**kwargs):
         handoff.raw_query_calls.append(kwargs)
-        assert kwargs == {"ids": [handoff.torrent.hash], "tags": None}
+        assert isinstance(kwargs.get("ids"), list) and len(kwargs["ids"]) == 1
+        assert kwargs.get("tags") is None
         if handoff.raw_response is not None:
             return handoff.raw_response()
         return [{"hash": handoff.torrent.hash, "state": "uploading", "progress": 1.0,
@@ -887,7 +888,7 @@ def test_raw_downloader_completion_proof_fails_closed(integrated, changes):
     state.configure_plugin(**execution_config(state))
     state.raw_changes = changes
     state.plugin.poll_completed()
-    assert state.ledger.list_records()[0]["state"] == "failed"
+    assert state.ledger.list_records() == []
     assert state.calls == [] and state.recognitions == []
     assert state.raw_query_calls
 
@@ -898,8 +899,9 @@ def test_missing_raw_completion_capability_evidence_cannot_execute(integrated, r
     state.configure_plugin(**execution_config(state))
     state.raw_response = lambda: response
     state.plugin.poll_completed()
-    assert state.ledger.list_records()[0]["state"] == "failed"
-    assert state.calls == []
+    assert state.ledger.list_records() == []
+    assert state.calls == [] and state.recognitions == []
+    assert state.raw_query_calls
 
 
 @pytest.mark.parametrize(("raw_state", "expected"), [
@@ -1009,6 +1011,11 @@ def test_400_plus_400_file_torrents_are_admitted_as_whole_batches(integrated, mo
                 for digit, folder in zip(("a", "b"), folders)]
     state.torrent = torrents[0]
     state.configure_plugin(**execution_config(state))
+    state.raw_response = lambda: [
+        {"hash": torrent.hash, "state": "uploading", "progress": 1.0,
+         "amount_left": 0, "tags": "JAV"}
+        for torrent in torrents
+    ]
     submissions = []
     snapshots = []
 

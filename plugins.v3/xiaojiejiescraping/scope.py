@@ -11,6 +11,7 @@ class RecognitionContext:
     operation: str
     storage: str
     path: str
+    scope_roots: tuple[Path, ...] | None = None
 
 
 def matches_scope(context: RecognitionContext | None, storage: str, roots: tuple[Path, ...]) -> bool:
@@ -29,7 +30,7 @@ def matches_scope(context: RecognitionContext | None, storage: str, roots: tuple
         actual = raw.resolve(strict=True)
         if not actual.is_file():
             return False
-        for root in roots:
+        for root in (context.scope_roots if context.scope_roots is not None else roots):
             if not root.is_absolute() or root == Path("/") or ".." in root.parts:
                 continue
             try:

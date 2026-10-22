@@ -30,7 +30,7 @@ class HandoffConfig:
     ownership_ack: bool = False
     auxiliary_ack: bool = False
 
-    def target(self) -> Path | None:
+    def target(self, roots: tuple[Path, ...] | None = None) -> Path | None:
         """目标必须为既有本地目录，且与所有输入目录双向不重叠。"""
         if self.mode not in ("preview", "execute") or self.operation not in ("copy", "link"):
             return None
@@ -39,13 +39,14 @@ class HandoffConfig:
         if not isinstance(self.target_path, str):
             return None
         raw = Path(self.target_path)
-        if not raw.is_absolute() or raw == Path("/") or ".." in raw.parts or not self.roots or not self.sources:
+        roots = self.roots if roots is None else roots
+        if not raw.is_absolute() or raw == Path("/") or ".." in raw.parts or not roots or not self.sources:
             return None
         try:
             target = raw.resolve(strict=True)
             if not target.is_dir() or target == Path("/"):
                 return None
-            for root in self.roots:
+            for root in roots:
                 resolved = root.resolve(strict=True)
                 if target.is_relative_to(resolved) or resolved.is_relative_to(target):
                     return None
@@ -96,17 +97,22 @@ class HandoffCoordinator:
         self.ledger, self.config = ledger, config
         self.recognize, self.transfer, self.history = recognize, transfer, history
 
-    def _admission(self, torrent, path: Path):
+    def _admission(self, torrent, path: Path, scope_roots: tuple[Path, ...] | None = None,
+                   match_mode: str | None = None):
         """构造源文件版本与完整意图，交由单一事务统一准入。"""
-        target = self.config.target()
-        context = RecognitionContext("transfer", "local", str(path))
-        if target is None or not matches_scope(context, "local", self.config.roots):
+        scope_roots = self.config.roots if scope_roots is None else scope_roots
+        target = self.config.target(scope_roots)
+        context = RecognitionContext("transfer", "local", str(path), scope_roots)
+        if target is None or not matches_scope(context, "local", scope_roots):
             return None
         fingerprint = _fingerprint(path)
         payload = {"path": str(path), "source_storage": "local", "real_path": str(path.resolve()),
                    "downloader": torrent.downloader, "download_hash": torrent.hash,
-                   "target_root": str(target), "operation": self.config.operation,
+                   "target_root": str(target), "scope_roots": [str(root) for root in scope_roots],
+                   "operation": self.config.operation,
                    "mode": self.config.mode, "config_key": self.config.signature(), **fingerprint}
+        if match_mode:
+            payload["match_mode"] = match_mode
         # 实际执行的所有权必须独立于目标/模式选择/来源顺序等可变配置。
         # 同一物理文件版本即使改名、改 qbit hash 或换目标，也不能绕过未知结果重新提交。
         source_version = {field: fingerprint[field] for field in ("device", "inode", "size", "mtime_ns")}
@@ -116,11 +122,12 @@ class HandoffCoordinator:
         payload["admission_complete"] = True
         return task_key(ownership), payload
 
-    def enqueue_batch(self, torrent, paths: tuple[Path, ...]) -> list[dict]:
+    def enqueue_batch(self, torrent, paths: tuple[Path, ...], scope_roots: tuple[Path, ...] | None = None,
+                      match_mode: str | None = None) -> list[dict]:
         """同一 eligible 种子的所有文件在一个事务中入队；容量失败不能留半批。"""
         if not paths:
             return []
-        entries = [self._admission(torrent, path) for path in paths]
+        entries = [self._admission(torrent, path, scope_roots, match_mode) for path in paths]
         if any(entry is None for entry in entries):
             return []
         return self.ledger.claim_batch(entries)
@@ -152,8 +159,12 @@ class HandoffCoordinator:
         return self.ledger.get(key)
 
     def _source_valid(self, payload: dict) -> bool:
-        context = RecognitionContext("transfer", "local", payload["path"])
-        if not matches_scope(context, "local", self.config.roots):
+        # Old ledger records predate per-task scopes and remain bound to configured roots.
+        scope_roots = tuple(Path(root) for root in payload.get(
+            "scope_roots", tuple(str(root) for root in self.config.roots),
+        ))
+        context = RecognitionContext("transfer", "local", payload["path"], scope_roots)
+        if not scope_roots or not matches_scope(context, "local", scope_roots):
             return False
         try:
             current = _fingerprint(Path(payload["path"]))
@@ -164,14 +175,17 @@ class HandoffCoordinator:
 
     def _prepare(self, key: str, eligible: Callable, can_continue: Callable) -> dict:
         payload = self.ledger.get(key)["payload"]
-        target = self.config.target()
+        scope_roots = tuple(Path(root) for root in payload.get(
+            "scope_roots", tuple(str(root) for root in self.config.roots),
+        ))
+        target = self.config.target(scope_roots)
         try:
             if (target is None or str(target) != payload["target_root"] or not eligible(payload)
                     or not self._source_valid(payload) or not can_continue()):
                 return self._finish(key, "failed", "source_scope_or_configuration_changed")
             path = Path(payload["path"])
             meta = MetaInfo(path.name)
-            media = self.recognize(RecognitionContext("transfer", "local", str(path)), meta=meta)
+            media = self.recognize(RecognitionContext("transfer", "local", str(path), scope_roots), meta=meta)
             if (not media or media.type != MediaType.MOVIE or str(media.media_source) not in self.config.sources
                     or not media.media_id or str(media.media_id) == "0"):
                 return self._finish(key, "failed", "no_verified_metadata")
@@ -184,7 +198,7 @@ class HandoffCoordinator:
             item = FileItem(storage="local", path=str(path), type="file", name=path.name,
                             basename=path.stem, extension=path.suffix.lstrip("."),
                             size=payload["size"], modify_time=payload["modify_time"])
-            continuation = lambda: can_continue() and self._source_valid(payload) and self.config.target() == target
+            continuation = lambda: can_continue() and self._source_valid(payload) and self.config.target(scope_roots) == target
             directory = TransferDirectoryConf(
                 name="Xiaojiejie-Scraping", library_path=str(target), library_storage="local",
                 transfer_type=self.config.operation, overwrite_mode="never", renaming=True,

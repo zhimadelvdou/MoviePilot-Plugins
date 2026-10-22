@@ -43,7 +43,13 @@ def automatic_plugin(polling_plugin, torrent, monkeypatch, tmp_path):
     module = SimpleNamespace(get_instances=lambda: {"qbit-main": instance})
     monkeypatch.setattr(service_directory, "_module_loader", lambda _kind: [module])
     plugin.init_plugin(config)
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: [torrent])
+    source = Path(torrent.content_path)
+    torrent.save_path = str(source.parent)
+    plugin.chain = SimpleNamespace(
+        list_torrents=lambda **_kwargs: [torrent],
+        torrent_files=lambda **_kwargs: [DownloaderFile(
+            id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1)],
+    )
     return plugin, config, torrent, raw, calls, target
 
 
@@ -85,13 +91,37 @@ def test_auto_new_only_rejects_old_task_after_exact_tag_is_added(automatic_plugi
     assert plugin._auto_counts["new_only_rejected"] >= 1
 
 
+@pytest.mark.parametrize(("field", "value"), [
+    ("state", "downloading"), ("progress", 0.99), ("amount_left", 1), ("hash", "b" * 40),
+])
+def test_raw_public_completion_row_is_required_for_every_automatic_match_mode(
+        automatic_plugin, field, value):
+    plugin, config, _, raw, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "auto_new_only": False, "automatic_match_mode": "tag"})
+    raw[field] = value
+    assert plugin.poll_completed() == []
+
+
+def test_tag_only_discovery_requires_public_file_manifest(automatic_plugin):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "auto_new_only": False, "automatic_match_mode": "tag"})
+    plugin.chain.torrent_files = lambda **_kwargs: None
+    assert plugin.poll_completed() == []
+    assert "清单" in plugin._handoff_error
+
+
 def test_auto_new_only_checks_at_most_one_batch_and_cursor_reaches_task_101(automatic_plugin, monkeypatch):
     plugin, _, torrent, _, calls, _ = automatic_plugin
     started_at = int(time.time()) - 2
     set_started_at(plugin, started_at)
     torrents = [torrent.model_copy(update={"hash": f"{index:040x}"})
                 for index in range(1, 102)]
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: torrents)
+    source = Path(torrent.content_path)
+    plugin.chain = SimpleNamespace(
+        list_torrents=lambda **_kwargs: torrents,
+        torrent_files=lambda **_kwargs: [DownloaderFile(
+            id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1)],
+    )
     completion = {
         item.hash: (int(time.time()) if item.hash == torrents[100].hash else started_at - 1)
         for item in torrents
@@ -147,11 +177,19 @@ def test_auto_new_only_rechecks_completion_time_at_final_candidate_boundary(auto
     plugin.init_plugin({**config, "handoff_mode": "preview"})
     set_started_at(plugin, int(time.time()) - 2)
     calls = []
+    final_candidate_checked = False
 
     def get_completed_torrents(**kwargs):
         calls.append(kwargs)
-        completion_on = int(time.time()) if len(calls) < 4 else plugin._auto_guard.started_at - 1
+        completion_on = (plugin._auto_guard.started_at - 1 if final_candidate_checked
+                         else int(time.time()))
         return [{**raw, "completion_on": completion_on}]
+
+    def list_torrents(**kwargs):
+        nonlocal final_candidate_checked
+        if kwargs.get("hashs") == [torrent.hash]:
+            final_candidate_checked = True
+        return [torrent]
 
     instance = SimpleNamespace(
         get_completed_torrents=get_completed_torrents)
@@ -159,7 +197,7 @@ def test_auto_new_only_rechecks_completion_time_at_final_candidate_boundary(auto
     from app.application import service as service_directory
     plugin._auto_counts = {"checked": 0, "new_only_rejected": 0, "discovered": 0, "enqueued": 0}
     plugin.chain = SimpleNamespace(
-        list_torrents=lambda **_kwargs: [torrent],
+        list_torrents=list_torrents,
         torrent_files=lambda **_kwargs: [DownloaderFile(
             id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1,
         )],
@@ -169,7 +207,10 @@ def test_auto_new_only_rechecks_completion_time_at_final_candidate_boundary(auto
     recognized = []
     plugin._handoff.recognize = lambda *args, **kwargs: recognized.append(True)
     plugin.poll_completed()
-    assert len(plugin._handoff.ledger.list_records(limit=10)) == 1
+    records = plugin._handoff.ledger.list_records(limit=10)
+    assert len(records) == 1
+    assert records[0]["state"] == "failed"
+    assert final_candidate_checked is True
     assert recognized == []
 
 
@@ -200,6 +241,7 @@ def test_auto_new_only_local_remote_local_resets_boundary(automatic_plugin):
 @pytest.mark.parametrize("change", [
     {"downloader": "qbit-other"}, {"torrent_tag": "OTHER"}, {"recognize_dirs": ["/other"]},
     {"target_path": "/other-target"}, {"sources": ["javbus"]}, {"transfer_type": "copy"},
+    {"automatic_match_mode": "tag"},
 ])
 def test_auto_new_only_scope_change_rearms(automatic_plugin, change):
     plugin, config, _, _, _, _ = automatic_plugin
@@ -209,6 +251,91 @@ def test_auto_new_only_scope_change_rearms(automatic_plugin, change):
     assert plugin._auto_guard.armed is True
     assert plugin._auto_guard.scope_signature != previous_scope
     assert plugin._auto_guard.started_at > previous
+
+
+def test_legacy_auto_match_mode_defaults_to_tag_and_path(automatic_plugin):
+    plugin, _, _, _, _, _ = automatic_plugin
+    assert plugin.automatic_status()["match_mode"] == "tag_and_path"
+    assert plugin.get_form()[1]["automatic_match_mode"] == "tag_or_path"
+
+
+@pytest.mark.parametrize(("match_mode", "tag", "roots", "torrent_tags", "should_discover"), [
+    ("tag", "JAV", [], "JAV", True),
+    ("tag", "JAV", [], "other", False),
+    ("path", "", None, "other", True),
+    ("path", "", None, "JAV", True),
+    ("tag_or_path", "JAV", [], "JAV", True),
+    ("tag_or_path", "JAV", None, "other", True),
+    ("tag_or_path", "", None, "other", True),
+    ("tag_and_path", "JAV", None, "other", False),
+    ("tag_and_path", "JAV", None, "JAV", True),
+])
+def test_auto_match_modes_select_only_their_configured_tag_or_path(
+        automatic_plugin, match_mode, tag, roots, torrent_tags, should_discover):
+    plugin, config, torrent, raw, _, _ = automatic_plugin
+    torrent.tags = torrent_tags
+    config = {**config, "automatic_match_mode": match_mode, "torrent_tag": tag}
+    if roots == []:
+        config["recognize_dirs"] = []
+    elif roots is None:
+        config["recognize_dirs"] = [str(Path(torrent.content_path).parent)]
+    plugin.init_plugin(config)
+    source = Path(torrent.content_path)
+    torrent.save_path = str(source.parent)
+    plugin.chain = SimpleNamespace(
+        list_torrents=lambda **_kwargs: [torrent],
+        torrent_files=lambda **_kwargs: [DownloaderFile(
+            id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1)],
+    )
+    set_started_at(plugin, int(time.time()) - 2)
+    raw["completion_on"] = int(time.time())
+
+    assert bool(plugin.get_service()) is True
+    assert bool(plugin.poll_completed()) is should_discover
+
+
+@pytest.mark.parametrize("bad_mode", [[], {}, 1, None])
+def test_invalid_typed_auto_match_mode_disables_only_automatic_service(automatic_plugin, bad_mode):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": bad_mode})
+    assert plugin.get_service() == []
+    assert plugin.automatic_status()["match_mode"] == "invalid"
+    assert plugin._enabled is True
+
+
+@pytest.mark.parametrize("empty_rules", [None, []])
+def test_tag_only_automatic_check_treats_empty_native_rules_as_no_overlap(automatic_plugin, monkeypatch, empty_rules):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": "tag", "recognize_dirs": []})
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, _key: empty_rules)
+    result = plugin.automatic_check()
+    assert result["native_monitor_overlap"] is False
+    assert result["ready"] is True
+
+
+def test_tag_only_automatic_check_leaves_native_overlap_unknown_when_rules_exist(automatic_plugin, monkeypatch):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": "tag", "recognize_dirs": []})
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, _key: [{
+        "storage": "local", "monitor_type": "monitor", "download_path": "/media/monitor",
+    }])
+    result = plugin.automatic_check()
+    assert result["native_monitor_overlap"] is None
+    assert result["ready"] is False
+
+
+def test_automatic_check_reports_native_directory_read_failure_as_unknown(automatic_plugin, monkeypatch):
+    plugin, _, _, _, _, _ = automatic_plugin
+
+    def fail_read(_self, _key):
+        raise RuntimeError("private system config detail")
+
+    monkeypatch.setattr(SystemConfigOper, "get", fail_read)
+    result = plugin.automatic_check()
+    assert result["native_monitor_overlap"] is None
+    assert result["directories_available"] is False
+    assert result["ready"] is False
+    assert "private system config detail" not in str(result)
 
 
 def test_auto_new_only_corrupt_control_ledger_fails_closed(automatic_plugin, tmp_path):
@@ -243,7 +370,7 @@ def test_disabled_discovery_still_registers_authenticated_status_and_check(autom
     plugin, config, _, _, calls, _ = automatic_plugin
     plugin.init_plugin({**config, "discovery_enabled": False})
     plugin.automatic_check = lambda: {
-        "ready": True, "message": "条件检查通过", "downloader_type": "qbittorrent",
+        "ready": True, "message": "条件检查通过", "match_mode": "tag_and_path", "downloader_type": "qbittorrent",
         "completion_capability": True, "completion_rows_checked": 1, "completion_time_rows": 1,
         "native_monitor_overlap": False, "native_monitor_count": 0,
         "directories_available": True, "errors": [],

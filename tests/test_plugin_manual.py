@@ -91,6 +91,35 @@ def test_manual_preview_pins_identity_and_duplicate_execute_does_not_resubmit(ma
     assert source.read_bytes() == b"synthetic media"
 
 
+def test_manual_preview_accepts_user_selected_local_paths_outside_automatic_roots(manual_workspace, tmp_path):
+    plugin, workspace, _, _, _, calls = manual_workspace
+    source_root = tmp_path / "picked-source"
+    target_root = tmp_path / "picked-target"
+    source_root.mkdir()
+    target_root.mkdir()
+    source = source_root / "TEST-456.mkv"
+    source.write_bytes(b"another fixture")
+    configured_roots = plugin._dirs
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source_root), target_path=str(target_root), media_source="manko",
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].target == str(target_root / source.name)
+    assert plugin._dirs == configured_roots
+    assert calls[0]["target_path"] == target_root
+    assert all(call.get("preview") is True for call in calls)
+
+
+def test_manual_browse_starts_from_local_root_and_keeps_roots_as_shortcuts(manual_workspace):
+    _, workspace, _, _, _, _ = manual_workspace
+    options = workspace.options()
+    listing = workspace.browse("", "source")
+    assert options.roots
+    assert listing.path == str(Path("/"))
+    assert listing.parent is None
+
+
 @pytest.mark.parametrize("path", ["../outside/TEST-123.mkv"])
 def test_manual_preview_rejects_paths_outside_configured_roots(manual_workspace, path):
     _, workspace, _, target, _, _ = manual_workspace
@@ -107,14 +136,38 @@ def test_manual_preview_rejects_target_inside_source_root(manual_workspace):
             path=str(source), target_path=str(root), media_source="manko",
         ))
 
-def test_manual_preview_accepts_only_configured_target_descendants(manual_workspace, tmp_path):
+def test_manual_preview_accepts_user_selected_target_outside_configured_tree(manual_workspace, tmp_path):
     _, workspace, _, _, source, _ = manual_workspace
     other = tmp_path / "other-target"
     other.mkdir()
-    with pytest.raises(ValueError, match="设置中的既有目标目录"):
-        workspace.preview(ManualPreviewRequest(
-            path=str(source), target_path=str(other), media_source="manko",
-        ))
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(other), media_source="manko",
+    ))
+    assert preview.summary.success == 1
+    assert preview.items[0].target == str(other / source.name)
+
+
+def test_manual_preview_works_without_automatic_roots_or_valid_global_target(manual_workspace, tmp_path):
+    plugin, workspace, _, _, _, calls = manual_workspace
+    source_root = tmp_path / "independent-source"
+    target_root = tmp_path / "independent-target"
+    source_root.mkdir()
+    target_root.mkdir()
+    source = source_root / "TEST-456.mkv"
+    source.write_bytes(b"manual only")
+    plugin._dirs = ()
+    plugin._handoff.config.target_path = "/"
+
+    assert workspace.options().enabled is True
+    assert workspace.options().roots == []
+    assert workspace.options().default_target_path is None
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target_root), media_source="manko",
+    ))
+
+    assert preview.summary.success == 1
+    assert plugin._dirs == ()
+    assert calls[0]["target_path"] == target_root
 
 
 def test_manual_preview_rejects_unselected_source_and_client_identity(manual_workspace):

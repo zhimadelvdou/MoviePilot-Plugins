@@ -10,6 +10,7 @@ from app.api.endpoints.plugin import get_current_active_superuser
 class AutomaticStatus(BaseModel):
     enabled: bool
     mode: str
+    match_mode: str
     new_only: bool
     armed: bool
     started_at: int | None = None
@@ -26,6 +27,7 @@ class AutomaticStatus(BaseModel):
 class AutomaticCheck(BaseModel):
     ready: bool
     message: str
+    match_mode: str
     downloader_type: str
     completion_capability: bool
     completion_rows_checked: int

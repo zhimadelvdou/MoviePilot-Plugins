@@ -22,7 +22,8 @@ HASH = "a" * 40
 def torrent(scope_context):
     return DownloaderTorrent(
         downloader="qbit-main", hash=HASH, tags="other, JAV, reviewed", progress=100,
-        state="completed", content_path=scope_context.path, save_path="/raw/container/path",
+        state="completed", content_path=scope_context.path,
+        save_path=str(Path(scope_context.path).parent),
     )
 
 
@@ -126,14 +127,35 @@ def polling_plugin(monkeypatch, tmp_path, plugin_host_context, scope_context):
     monkeypatch.setattr(service_directory, "_config_loader", lambda _key, _type: [
         DownloaderConf(name="qbit-main", type="qbittorrent", enabled=True),
     ])
+    source = Path(scope_context.path)
+
+    def raw_completed(**kwargs):
+        ids = kwargs.get("ids")
+        hashes = [HASH] if ids is None else ids
+        return [{"hash": infohash, "state": "uploading", "progress": 1.0, "amount_left": 0,
+                 "tags": "JAV", "completion_on": 4_000_000_000} for infohash in hashes]
+
+    raw_module = SimpleNamespace(get_instances=lambda: {"qbit-main": SimpleNamespace(
+        get_completed_torrents=raw_completed)})
+    monkeypatch.setattr(service_directory, "_module_loader", lambda _kind: [raw_module])
     plugin = XiaojiejieScraping()
     config = {
         "enabled": True, "discovery_enabled": True, "downloader": "qbit-main",
         "torrent_tag": "JAV", "recognize_dirs": [str(Path(scope_context.path).parent)],
     }
     plugin.init_plugin(config)
+    manifest_query = lambda **_kwargs: [DownloaderFile(
+        id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1)]
+    plugin._test_manifest_query = manifest_query
+    monkeypatch.setattr(plugin.chain, "torrent_files", manifest_query, raising=False)
     yield plugin, config
     plugin.stop_service()
+
+
+def replace_list_torrents(plugin, list_torrents):
+    """Replace only the normalized task query; keep the SDK public file manifest."""
+    manifest_query = plugin._test_manifest_query
+    plugin.chain = SimpleNamespace(list_torrents=list_torrents, torrent_files=manifest_query)
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -175,7 +197,7 @@ def test_poll_uses_host_readonly_query_and_never_recognizes_or_submits(polling_p
 
 def test_poll_is_bounded_to_100_torrents(polling_plugin, torrent, monkeypatch):
     plugin, _ = polling_plugin
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: [torrent] * 150)
+    replace_list_torrents(plugin, lambda **_kwargs: [torrent] * 150)
     calls = []
     monkeypatch.setattr(plugin._journal, "discover", lambda item, files: calls.append((item, files)) or [])
     assert plugin.poll_completed() == []
@@ -216,7 +238,7 @@ def test_failed_downloader_read_releases_lock_for_next_poll(polling_plugin, torr
         plugin.poll_completed()
     assert plugin._poll_lock.locked() is False
     assert not (tmp_path / "discovery-v1.json").exists()
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: [torrent])
+    replace_list_torrents(plugin, lambda **_kwargs: [torrent])
     assert len(plugin.poll_completed()) == 1
 
 
@@ -240,11 +262,12 @@ def test_journal_cursor_is_sorted_persistent_and_wraps_without_starvation(torren
 def test_seen_first_100_tasks_cannot_starve_101st_after_restart(polling_plugin, torrent):
     plugin, config = polling_plugin
     torrents = [torrent.model_copy(update={"hash": f"{index:040x}"}) for index in range(1, 102)]
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: list(reversed(torrents)))
+    replace_list_torrents(plugin, lambda **_kwargs: list(reversed(torrents)))
     first = plugin.poll_completed()
     assert len(first) == 100
     assert {item["hash"] for item in first} == {item.hash for item in torrents[:100]}
     plugin.init_plugin(config)
+    replace_list_torrents(plugin, lambda **_kwargs: list(reversed(torrents)))
     second = plugin.poll_completed()
     assert [item["hash"] for item in second] == [torrents[100].hash]
     assert plugin.poll_completed() == []
@@ -255,7 +278,7 @@ def test_downloader_and_tag_prefilter_run_before_batch_limit(polling_plugin, tor
     plugin, _ = polling_plugin
     unrelated = [torrent.model_copy(update={"hash": f"{index:040x}", **mismatch}) for index in range(1, 102)]
     eligible = torrent.model_copy(update={"hash": "f" * 40})
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: unrelated + [eligible])
+    replace_list_torrents(plugin, lambda **_kwargs: unrelated + [eligible])
     assert [item["hash"] for item in plugin.poll_completed()] == [eligible.hash]
 
 
@@ -263,7 +286,7 @@ def test_invalid_completed_candidates_do_not_permanently_block_later_eligible_ta
     plugin, _ = polling_plugin
     invalid = [torrent.model_copy(update={"hash": f"{index:040x}", "progress": 99}) for index in range(1, 101)]
     eligible = torrent.model_copy(update={"hash": "f" * 40})
-    plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: invalid + [eligible])
+    replace_list_torrents(plugin, lambda **_kwargs: invalid + [eligible])
     assert plugin.poll_completed() == []
     assert [item["hash"] for item in plugin.poll_completed()] == [eligible.hash]
 
@@ -322,7 +345,9 @@ def test_service_configuration_error_fails_closed_without_downloader_query(polli
 def test_500_file_cutoff_advances_only_the_torrent_actually_processed(polling_plugin, torrent, scope_context, monkeypatch):
     from app.plugins import xiaojiejiescraping as plugin_module  # pylint: disable=import-error,no-name-in-module
 
-    plugin, _ = polling_plugin
+    plugin, config = polling_plugin
+    # Path-only discovery has no tag branch and therefore does not require an ownership manifest.
+    plugin.init_plugin({**config, "automatic_match_mode": "path", "torrent_tag": ""})
     torrents = [torrent.model_copy(update={"hash": f"{index:040x}"}) for index in range(1, 102)]
     plugin.chain = SimpleNamespace(list_torrents=lambda **_kwargs: list(reversed(torrents)))
     monkeypatch.setattr(plugin_module, "torrent_files", lambda *_args, **_kwargs: (Path(scope_context.path),) * 500)

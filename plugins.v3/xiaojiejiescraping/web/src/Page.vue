@@ -1,7 +1,10 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useTheme } from 'vuetify'
 
 const props = defineProps({ api: { type: Object, required: true }, pluginId: { type: [String, Number], required: true }, sourcePluginId: { type: [String, Number], default: '' } })
+const hostTheme = useTheme()
+const hostThemeName = computed(() => hostTheme.global.name.value)
 const options = ref(null)
 const sourcePath = ref('')
 const targetPath = ref('')
@@ -14,6 +17,7 @@ const outcome = ref('')
 const error = ref('')
 const browser = ref(null)
 const browseKind = ref('source')
+const browsePurpose = ref('manual')
 const browsePath = ref('')
 const parentPath = ref('')
 const browseItems = ref([])
@@ -25,6 +29,10 @@ const automaticCheckBusy = ref(false)
 const automaticCheckMessage = ref('')
 const automaticToggleBusy = ref(false)
 const automaticToggleMessage = ref('')
+const automaticRules = ref({ automatic_match_mode: 'tag_and_path', downloader: '', torrent_tag: '', recognize_dirs: '', target_path: '' })
+const automaticDownloaders = ref([])
+const automaticRulesBusy = ref(false)
+const automaticRulesMessage = ref('')
 let requestGeneration = 0
 let clockTimer
 const previewExpiryMs = computed(() => {
@@ -50,11 +58,30 @@ const endpoint = (name) => `plugin/${props.pluginId}/manual/${name}`
 const automaticEndpoint = (name) => `plugin/${props.pluginId}/automatic/${name}`
 const pluginConfigEndpoint = () => `plugin/${props.pluginId}`
 const automaticToggleDisabled = computed(() => automaticToggleBusy.value || automaticStatusBusy.value
-  || automaticCheckBusy.value || typeof automaticStatus.value?.enabled !== 'boolean')
+  || automaticCheckBusy.value || automaticRulesBusy.value || typeof automaticStatus.value?.enabled !== 'boolean')
+const automaticRulesDisabled = computed(() => automaticRulesBusy.value || automaticToggleBusy.value)
+const automaticDownloaderItems = computed(() => {
+  const choices = automaticDownloaders.value.map(item => ({ title: item.name, value: item.name }))
+  const current = automaticRules.value.downloader
+  if (current && !choices.some(item => item.value === current)) choices.unshift({ title: `${current}（当前配置）`, value: current })
+  return [{ title: '请选择下载器', value: '' }, ...choices]
+})
+const automaticRulesCanSave = computed(() => {
+  const rules = automaticRules.value
+  const hasTag = !!rules.downloader && !!rules.torrent_tag.trim()
+  const hasPath = !!rules.downloader && !!rules.recognize_dirs.trim()
+  if (rules.automatic_match_mode === 'tag') return hasTag
+  if (rules.automatic_match_mode === 'path') return hasPath
+  if (rules.automatic_match_mode === 'tag_or_path') return hasTag || hasPath
+  return hasTag && hasPath
+})
 const automaticStatusLabel = computed(() => {
   if (typeof automaticStatus.value?.enabled !== 'boolean') return '状态未知'
   return automaticStatus.value.enabled ? '已开启' : '已关闭'
 })
+const automaticMatchModeLabel = computed(() => ({
+  tag: '按标签', path: '按路径', tag_or_path: '标签或路径', tag_and_path: '标签且路径',
+}[automaticStatus.value?.match_mode] || '状态未返回'))
 const storageKey = () => `xiaojiejiescraping:manual-pending:${props.pluginId}`
 const automaticModeLabel = computed(() => {
   if (!automaticStatus.value) return '状态未获取'
@@ -130,10 +157,16 @@ async function loadOptions() {
     error.value = '无法加载可用来源和目录。'
   }
 }
-async function openBrowser(kind) {
+async function openBrowser(kind, purpose = 'manual') {
   if (formLocked.value) return
   browseKind.value = kind
-  browsePath.value = kind === 'source' ? (sourcePath.value || options.value?.roots?.[0] || '') : (targetPath.value || options.value?.default_target_path || '')
+  browsePurpose.value = purpose
+  if (purpose === 'automatic') {
+    const roots = automaticRules.value.recognize_dirs.split(/\r?\n/).map(path => path.trim()).filter(Boolean)
+    browsePath.value = kind === 'source' ? (roots.at(-1) || options.value?.roots?.[0] || '/') : (automaticRules.value.target_path || options.value?.default_target_path || '/')
+  } else {
+    browsePath.value = kind === 'source' ? (sourcePath.value || options.value?.roots?.[0] || '/') : (targetPath.value || options.value?.default_target_path || '/')
+  }
   browser.value = true
   await loadBrowse()
 }
@@ -152,12 +185,17 @@ async function loadBrowse(path = browsePath.value) {
 function chooseItem(item) {
   if (formLocked.value) return
   if (item.type === 'dir' || item.type === 'directory') { void loadBrowse(item.path); return }
+  if (browsePurpose.value === 'automatic') return
   setPath(browseKind.value, item.path)
   browser.value = false
 }
 function chooseCurrentDirectory() {
   if (formLocked.value) return
-  setPath(browseKind.value, browsePath.value)
+  if (browsePurpose.value === 'automatic' && browseKind.value === 'source') {
+    const roots = automaticRules.value.recognize_dirs.split(/\r?\n/).map(path => path.trim()).filter(Boolean)
+    if (!roots.includes(browsePath.value)) automaticRules.value.recognize_dirs = [...roots, browsePath.value].join('\n')
+  } else if (browsePurpose.value === 'automatic') automaticRules.value.target_path = browsePath.value
+  else setPath(browseKind.value, browsePath.value)
   browser.value = false
 }
 async function createPreview() {
@@ -255,8 +293,64 @@ function readPluginConfigResponse(payload) {
   }
   return payload
 }
+function pluginConfigEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.success !== true
+      || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+    throw new Error('plugin config unavailable')
+  }
+  return payload.data
+}
+function downloaderEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.success !== true || !Array.isArray(payload.data)) {
+    throw new Error('download clients unavailable')
+  }
+  return payload.data.filter(item => item && item.type === 'qbittorrent' && typeof item.name === 'string' && item.name.trim())
+    .map(item => ({ name: item.name, type: item.type }))
+}
+async function loadAutomaticRules() {
+  try {
+    const config = pluginConfigEnvelope(await props.api.get(pluginConfigEndpoint()))
+    automaticRules.value = {
+      automatic_match_mode: ['tag', 'path', 'tag_or_path', 'tag_and_path'].includes(config.automatic_match_mode) ? config.automatic_match_mode : 'tag_and_path',
+      downloader: typeof config.downloader === 'string' ? config.downloader : '',
+      torrent_tag: typeof config.torrent_tag === 'string' ? config.torrent_tag : '',
+      recognize_dirs: typeof config.recognize_dirs === 'string' ? config.recognize_dirs : '',
+      target_path: typeof config.target_path === 'string' ? config.target_path : '',
+    }
+    automaticDownloaders.value = downloaderEnvelope(await props.api.get('download/clients'))
+    automaticRulesMessage.value = ''
+  } catch {
+    automaticRulesMessage.value = '自动规则未能读取；请检查插件配置和下载器列表。'
+  }
+}
+async function saveAutomaticRules() {
+  if (!automaticRulesCanSave.value || automaticRulesDisabled.value) return
+  automaticRulesBusy.value = true
+  automaticRulesMessage.value = ''
+  try {
+    const current = pluginConfigEnvelope(await props.api.get(pluginConfigEndpoint()))
+    const updated = {
+      ...current,
+      automatic_match_mode: automaticRules.value.automatic_match_mode,
+      downloader: automaticRules.value.downloader,
+      torrent_tag: automaticRules.value.torrent_tag,
+      recognize_dirs: automaticRules.value.recognize_dirs,
+      target_path: automaticRules.value.target_path,
+    }
+    const response = await props.api.put(pluginConfigEndpoint(), updated)
+    if (!response || response.success !== true) throw new Error('plugin config update failed')
+    const saved = pluginConfigEnvelope(await props.api.get(pluginConfigEndpoint()))
+    if (saved.automatic_match_mode !== updated.automatic_match_mode || saved.downloader !== updated.downloader
+      || saved.torrent_tag !== updated.torrent_tag || saved.recognize_dirs !== updated.recognize_dirs
+      || saved.target_path !== updated.target_path) throw new Error('plugin config readback mismatch')
+    automaticRulesMessage.value = '自动规则已保存；自动触发开关保持原状态。'
+    await loadAutomaticStatus()
+  } catch {
+    automaticRulesMessage.value = '自动规则保存未确认；请刷新配置后核对。'
+  } finally { automaticRulesBusy.value = false }
+}
 async function setAutomaticEnabled(event) {
-  const desired = event?.target?.checked === true
+  const desired = typeof event === 'boolean' ? event : event?.target?.checked === true
   if (event?.target) event.target.checked = automaticStatus.value?.enabled === true
   if (automaticToggleDisabled.value || desired === automaticStatus.value?.enabled) return
   automaticToggleBusy.value = true
@@ -290,7 +384,7 @@ async function setAutomaticEnabled(event) {
 }
 onMounted(async () => {
   clockTimer = setInterval(() => { now.value = Date.now() }, 500)
-  await loadOptions()
+  await Promise.all([loadOptions(), loadAutomaticRules()])
   await restorePendingPreview()
   await loadAutomaticStatus()
 })
@@ -298,40 +392,66 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 </script>
 
 <template>
-  <main class="manual-page">
-    <header><div><p class="eyebrow">MANUAL LIBRARY TRANSFER</p><h1>手动识别与整理</h1><p>选择已有目录，预览识别结果后再确认整理。源文件会保留。</p></div><button data-testid="reload-options" :disabled="formLocked" @click="loadOptions">重新加载</button></header>
-    <section class="panel auto-panel" data-testid="automatic-status">
-      <div class="section-title"><div><h2>自动触发</h2><p>按已配置的 qBittorrent 下载器和标签检查下载完成任务。</p></div><div class="automatic-toggle"><label class="automatic-switch"><input data-testid="automatic-toggle" type="checkbox" role="switch" aria-label="自动触发" :checked="automaticStatus?.enabled === true" :disabled="automaticToggleDisabled" @change="setAutomaticEnabled($event)"><span>自动触发</span></label><strong data-testid="automatic-toggle-state">{{ automaticStatusLabel }}</strong></div><button data-testid="automatic-refresh" :disabled="automaticStatusBusy || automaticToggleBusy" @click="loadAutomaticStatus">只读刷新状态</button></div>
-      <p class="muted">关闭后不会取消已受理的整理；<template v-if="automaticStatus?.new_only === true">重新开启后只处理之后完成的下载。</template><template v-else-if="automaticStatus?.new_only === false">重新开启后也会处理启用前已完成的旧任务。</template></p>
-      <p v-if="!automaticStatus" class="muted">自动触发状态未获取；手动识别与预览仍可使用。</p>
-      <template v-else>
-        <p><strong>{{ automaticModeLabel }}</strong><span> · {{ automaticStatus.armed ? '已启动' : '未启动' }}</span><span v-if="automaticStatus.started_at"> · 启动于 {{ formatAutomaticTime(automaticStatus.started_at) }}</span></p>
-        <p>{{ automaticStatus.new_only ? '仅处理启用后完成的下载；历史完成任务跳过。' : '会包含启用前已完成的旧任务。' }}</p>
-        <dl class="automatic-details"><dt>下载器 / 标签</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.torrent_tag || '未设置' }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>根目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
-        <p v-if="automaticCounts.length" class="count-list">计数：<span v-for="([key, value]) in automaticCounts" :key="key">{{ key }} {{ value }} · </span></p>
-        <p v-if="automaticStatus.error" class="error">{{ automaticStatus.error }}</p>
-      </template>
-      <div class="automatic-actions"><button data-testid="automatic-check" :disabled="automaticCheckBusy || automaticToggleBusy" @click="checkAutomaticConditions">{{ automaticCheckBusy ? '检查中…' : '检查触发条件（只读）' }}</button><span v-if="automaticCheckMessage" class="muted">{{ automaticCheckMessage }}</span><span v-if="automaticToggleMessage" data-testid="automatic-toggle-message" class="muted">{{ automaticToggleMessage }}</span></div>
-    </section>
-    <p v-if="!options?.enabled && options" class="notice">此功能当前不可用。</p>
-    <p v-if="error" role="alert" class="error">{{ error }}</p>
-    <section class="panel fields">
-      <label>来源目录或文件<div class="path-row"><input data-testid="source-path" :value="sourcePath" :disabled="formLocked" placeholder="/downloads/..." @input="setPath('source', $event.target.value)"><button data-testid="browse-source" :disabled="formLocked" @click="openBrowser('source')">浏览</button></div></label>
-      <label>目标目录<div class="path-row"><input data-testid="target-path" :value="targetPath" :disabled="formLocked" placeholder="/library/..." @input="setPath('target', $event.target.value)"><button data-testid="browse-target" :disabled="formLocked" @click="openBrowser('target')">浏览</button></div></label>
-      <label>识别来源<select data-testid="media-source" :value="mediaSource" :disabled="formLocked" @change="setMediaSource($event.target.value)"><option value="" disabled>请选择</option><option v-for="source in options?.sources || []" :key="source.value" :value="source.value">{{ source.title }}</option></select></label>
-      <div class="actions"><span class="muted">整理方式：硬链接（保留来源文件）</span><button data-testid="preview" class="primary" :disabled="previewBusy || formLocked || !options?.enabled || !sourcePath || !targetPath || !mediaSource" @click="createPreview">{{ previewBusy ? '处理中…' : '识别并预览' }}</button></div>
-    </section>
-    <section v-if="preview" class="panel results">
-      <div class="section-title"><div><h2>预览结果</h2><p>{{ preview.summary?.success || 0 }} 项可整理，{{ preview.summary?.failed || 0 }} 项失败</p></div><span v-if="!previewExpired" class="valid">预览有效至 {{ new Date(previewExpiryMs).toLocaleString() }}</span><span v-else class="error">预览已过期</span></div>
-      <div class="table-wrap"><table><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}</td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></table></div>
-      <label class="confirm"><input data-testid="confirm-transfer" v-model="confirmed" type="checkbox" :disabled="!preview || previewExpired || formLocked">我已核对预览，并确认按上述硬链接路径整理。</label>
-      <div class="actions"><span v-if="outcome === 'pendingaccepted'" class="notice">请求已受理，正在等待结果。</span><span v-else-if="outcome === 'completed'" class="valid">硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史</span><span v-else-if="outcome === 'failed'" class="error">整理失败，原任务已结束。</span><span v-else-if="outcome === 'unknown'" class="error">结果未知，不能重复提交。</span><button data-testid="execute" class="primary" :disabled="!canExecute" @click="execute">确认并整理</button><button v-if="outcome" data-testid="refresh-status" :disabled="busy" @click="refreshStatus">只读刷新状态</button></div>
-      <p v-if="preview.execution" class="muted">任务 {{ preview.execution.state }}：{{ preview.execution.summary?.success || 0 }} 项成功，{{ preview.execution.summary?.failed || 0 }} 项失败</p>
-    </section>
-    <div v-if="browser" class="overlay" role="dialog" aria-modal="true" aria-label="浏览目录"><section class="browser"><header><h2>选择{{ browseKind === 'source' ? '来源' : '目标' }}路径</h2><button @click="browser = false">关闭</button></header><div v-if="browseKind === 'source' && options?.roots?.length" class="root-list"><span>来源根目录</span><button v-for="root in options.roots" :key="root" :disabled="formLocked" @click="loadBrowse(root)">{{ root }}</button></div><p class="current-path">{{ browsePath }}</p><button :disabled="formLocked || !parentPath" @click="loadBrowse(parentPath)">返回上级目录</button><button :disabled="formLocked || !browsePath" @click="loadBrowse()">打开当前目录</button><ul><li v-for="item in browseItems" :key="item.path"><button data-testid="browse-item" :disabled="formLocked" @click="chooseItem(item)">{{ item.type === 'dir' || item.type === 'directory' ? '📁' : '文件' }} {{ item.name }}</button></li></ul><button class="primary" :disabled="formLocked || !browsePath" @click="chooseCurrentDirectory">选择当前目录</button></section></div>
+  <main class="manual-page" :data-host-theme="hostThemeName">
+    <VContainer class="pa-4 pa-md-6" fluid>
+    <VRow align="center" class="mb-2"><VCol><h1 class="text-h4 mb-1">Manko 整理</h1><p class="text-body-2 mb-0">自动整理下载完成的影片，也可手动选择目录；预览后再确认整理。源文件会保留。</p></VCol><VCol cols="auto"><VBtn data-testid="reload-options" variant="tonal" :disabled="formLocked" @click="loadOptions">重新加载</VBtn></VCol></VRow>
+    <VCard data-testid="automatic-status" class="mb-4" variant="outlined">
+      <VCardTitle class="d-flex flex-wrap align-center justify-space-between ga-3"><span>自动触发与匹配规则</span><div class="d-flex align-center ga-3"><VSwitch data-testid="automatic-toggle" label="自动触发" color="primary" hide-details :model-value="automaticStatus?.enabled === true" :disabled="automaticToggleDisabled" @update:model-value="setAutomaticEnabled"/><VChip data-testid="automatic-toggle-state" size="small" variant="tonal">{{ automaticStatusLabel }}</VChip></div></VCardTitle><VCardText>
+        <VAlert class="mb-3" density="compact" type="info" variant="tonal">关闭自动触发不会取消已受理的整理。<template v-if="automaticStatus?.new_only === true">重新开启后只处理之后完成的下载。</template><template v-else-if="automaticStatus?.new_only === false">重新开启后也会处理启用前已完成的旧任务。</template></VAlert>
+        <VAlert v-if="!automaticStatus" class="mb-3" density="compact" type="warning" variant="tonal">自动触发状态未获取；手动识别与预览仍可使用。</VAlert>
+        <template v-else>
+          <VAlert class="mb-2" density="compact" type="info" variant="tonal">{{ automaticModeLabel }} · {{ automaticStatus.armed ? '已启动' : '未启动' }}<span v-if="automaticStatus.started_at"> · 启动于 {{ formatAutomaticTime(automaticStatus.started_at) }}</span></VAlert>
+          <p>{{ automaticStatus.new_only ? '仅处理启用后完成的下载；历史完成任务跳过。' : '会包含启用前已完成的旧任务。' }}</p>
+          <dl class="automatic-details"><dt>匹配方式</dt><dd>{{ automaticMatchModeLabel }}</dd><dt>下载器 / 标签</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.torrent_tag || '未设置' }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>来源目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
+          <p v-if="automaticCounts.length">计数：<VChip v-for="([key, value]) in automaticCounts" :key="key" class="ma-1" size="x-small" variant="tonal">{{ key }} {{ value }}</VChip></p>
+          <VAlert v-if="automaticStatus.error" density="compact" type="error" variant="tonal">{{ automaticStatus.error }}</VAlert>
+        </template>
+        <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="automatic-refresh" variant="tonal" :loading="automaticStatusBusy" :disabled="automaticToggleBusy" @click="loadAutomaticStatus">只读刷新状态</VBtn><VBtn data-testid="automatic-check" variant="text" :loading="automaticCheckBusy" :disabled="automaticToggleBusy" @click="checkAutomaticConditions">检查触发条件（只读）</VBtn></div>
+        <VAlert v-if="automaticCheckMessage" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticCheckMessage }}</VAlert><VAlert v-if="automaticToggleMessage" data-testid="automatic-toggle-message" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticToggleMessage }}</VAlert>
+        <VDivider class="my-4" />
+        <h2 class="text-h6 mb-2">自动匹配规则</h2><p class="text-body-2">来源路径使用 MoviePilot 文件管理中可见的本地路径。硬链接要求来源与目标位于同一文件系统；不满足时会明确报错，不会改为复制。</p>
+        <VRow>
+          <VCol cols="12" md="6"><VSelect data-testid="automatic-match-mode" label="匹配方式" :items="[{title:'按专用标签',value:'tag'},{title:'按来源路径',value:'path'},{title:'任一满足（标签或路径）',value:'tag_or_path'},{title:'同时满足（标签且路径）',value:'tag_and_path'}]" item-title="title" item-value="value" :model-value="automaticRules.automatic_match_mode" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.automatic_match_mode = $event" /></VCol>
+          <VCol cols="12" md="6"><VSelect data-testid="automatic-downloader" label="qBittorrent 下载器" :items="automaticDownloaderItems" item-title="title" item-value="value" :model-value="automaticRules.downloader" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.downloader = $event" /></VCol>
+          <VCol cols="12" md="6"><VTextField data-testid="automatic-tag" label="专用标签" placeholder="如 Manko" :model-value="automaticRules.torrent_tag" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_tag = $event" /></VCol>
+          <VCol cols="12" md="6"><VTextarea data-testid="automatic-roots" label="来源目录（每行一个绝对路径）" rows="3" :model-value="automaticRules.recognize_dirs" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.recognize_dirs = $event" /><VBtn data-testid="browse-automatic-source" class="mt-1" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('source','automatic')">浏览并追加来源目录</VBtn></VCol>
+          <VCol cols="12" md="6"><VTextField data-testid="automatic-target" label="目标媒体库目录" placeholder="/library" :model-value="automaticRules.target_path" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.target_path = $event" /><VBtn data-testid="browse-automatic-target" class="mt-1" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('target','automatic')">浏览目标目录</VBtn></VCol>
+        </VRow>
+        <VAlert v-if="automaticRulesMessage" data-testid="automatic-rules-message" class="mt-2" density="compact" :type="automaticRulesMessage.includes('未确认') || automaticRulesMessage.includes('未能') ? 'warning' : 'success'" variant="tonal">{{ automaticRulesMessage }}</VAlert>
+        <div class="d-flex flex-wrap ga-2 mt-3"><VBtn data-testid="automatic-save-rules" color="primary" :loading="automaticRulesBusy" :disabled="automaticRulesDisabled || !automaticRulesCanSave" @click="saveAutomaticRules">保存自动规则</VBtn><VBtn data-testid="automatic-reload-rules" variant="tonal" :disabled="automaticRulesDisabled" @click="loadAutomaticRules">重新读取规则</VBtn></div>
+      </VCardText>
+    </VCard>
+    <VAlert v-if="!options?.enabled && options" class="mb-3" type="warning" variant="tonal">此功能当前不可用。</VAlert>
+    <VAlert v-if="error" class="mb-3" type="error" variant="tonal" role="alert">{{ error }}</VAlert>
+    <VCard class="mb-4" variant="outlined"><VCardTitle>手动整理</VCardTitle><VCardText>
+      <VRow>
+        <VCol cols="12" md="6"><VTextField data-testid="source-path" label="来源目录或文件" placeholder="/downloads/..." :model-value="sourcePath" :disabled="formLocked" @update:model-value="setPath('source',$event)"><template #append><VBtn data-testid="browse-source" variant="tonal" :disabled="formLocked" @click="openBrowser('source')">浏览</VBtn></template></VTextField></VCol>
+        <VCol cols="12" md="6"><VTextField data-testid="target-path" label="目标媒体库目录" placeholder="/library/..." :model-value="targetPath" :disabled="formLocked" @update:model-value="setPath('target',$event)"><template #append><VBtn data-testid="browse-target" variant="tonal" :disabled="formLocked" @click="openBrowser('target')">浏览</VBtn></template></VTextField></VCol>
+        <VCol cols="12"><p class="text-body-2">路径使用 MoviePilot 文件管理中可见的本地路径。整理方式为硬链接，要求来源与目标在同一文件系统；条件不满足时会显示错误，不会改为复制。目标影片目录会交给 MoviePilot 完成后续刮削。</p></VCol>
+        <VCol cols="12" md="6"><VSelect data-testid="media-source" label="识别来源" :items="options?.sources || []" item-title="title" item-value="value" :model-value="mediaSource" :disabled="formLocked" @update:model-value="setMediaSource" /></VCol>
+      </VRow>
+      <div class="d-flex flex-wrap align-center justify-space-between ga-3"><VChip variant="tonal">整理方式：硬链接（保留来源文件）</VChip><VBtn data-testid="preview" color="primary" :loading="previewBusy" :disabled="previewBusy || formLocked || !options?.enabled || !sourcePath || !targetPath || !mediaSource" @click="createPreview">识别并预览</VBtn></div>
+    </VCardText></VCard>
+    <VCard v-if="preview" class="mb-4" variant="outlined">
+      <VCardTitle class="d-flex flex-wrap justify-space-between ga-3"><span>预览结果</span><VChip :color="previewExpired ? 'error' : 'success'" variant="tonal">{{ previewExpired ? '预览已过期' : `有效至 ${new Date(previewExpiryMs).toLocaleString()}` }}</VChip></VCardTitle>
+      <VCardText><p>{{ preview.summary?.success || 0 }} 项可整理，{{ preview.summary?.failed || 0 }} 项失败</p>
+        <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}</td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
+        <VCheckbox data-testid="confirm-transfer" :model-value="confirmed" label="我已核对预览，并确认按上述硬链接路径整理。" :disabled="!preview || previewExpired || formLocked" @update:model-value="confirmed = $event" />
+        <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="execute" color="primary" :disabled="!canExecute" :loading="busy && outcome === 'pendingaccepted'" @click="execute">确认并整理</VBtn><VBtn v-if="outcome" data-testid="refresh-status" variant="tonal" :disabled="busy" :loading="busy" @click="refreshStatus">只读刷新状态</VBtn></div>
+        <VAlert v-if="outcome === 'pendingaccepted'" class="mt-3" type="info" variant="tonal">请求已受理，正在等待结果。</VAlert><VAlert v-else-if="outcome === 'completed'" class="mt-3" type="success" variant="tonal">硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史</VAlert><VAlert v-else-if="outcome === 'failed'" class="mt-3" type="error" variant="tonal">整理失败，原任务已结束。</VAlert><VAlert v-else-if="outcome === 'unknown'" class="mt-3" type="error" variant="tonal">结果未知，不能重复提交。</VAlert>
+        <p v-if="preview.execution" class="text-body-2">任务 {{ preview.execution.state }}：{{ preview.execution.summary?.success || 0 }} 项成功，{{ preview.execution.summary?.failed || 0 }} 项失败</p>
+      </VCardText>
+    </VCard>
+    <VDialog v-model="browser" max-width="720" scrollable aria-label="浏览目录"><VCard><VCardTitle class="d-flex align-center justify-space-between">选择{{ browsePurpose === 'automatic' && browseKind === 'source' ? '自动来源' : browseKind === 'source' ? '来源' : '目标' }}路径<VBtn icon="mdi-close" variant="text" aria-label="关闭目录浏览" @click="browser = false" /></VCardTitle><VCardText>
+      <div v-if="browseKind === 'source' && options?.roots?.length" class="d-flex flex-wrap ga-2 mb-3"><VChip>常用来源目录</VChip><VBtn v-for="root in options.roots" :key="root" size="small" variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse(root)">{{ root }}</VBtn></div>
+      <VTextField label="当前路径" :model-value="browsePath" readonly /><div class="d-flex flex-wrap ga-2 mb-3"><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !parentPath" @click="loadBrowse(parentPath)">返回上级目录</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse('/')">从根目录浏览</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="loadBrowse()">刷新当前目录</VBtn></div>
+      <VList density="compact"><VListItem v-for="item in browseItems" :key="item.path" :title="item.name" :subtitle="item.path" :disabled="browsePurpose === 'automatic' && browseKind === 'source' && item.type !== 'dir' && item.type !== 'directory'" data-testid="browse-item" @click="chooseItem(item)" /></VList>
+    </VCardText><VCardActions><VSpacer/><VBtn variant="text" @click="browser = false">取消</VBtn><VBtn data-testid="choose-browse-directory" color="primary" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="chooseCurrentDirectory">{{ browsePurpose === 'automatic' && browseKind === 'source' ? '追加此来源目录' : '选择此目录' }}</VBtn></VCardActions></VCard></VDialog>
+    </VContainer>
   </main>
 </template>
 
 <style scoped>
-.manual-page{box-sizing:border-box;min-height:100vh;max-width:1120px;margin:0 auto;padding:28px;color:#17232d;background:#f5f8f7;font:15px/1.5 system-ui,sans-serif}.manual-page *{box-sizing:border-box}header,.section-title,.actions,.path-row{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:22px}h1,h2{color:#17232d}h1{margin:0;font-size:28px}h2{margin:0;font-size:19px}.eyebrow{color:#638078;font-size:11px;letter-spacing:.14em}.panel{padding:22px;border:1px solid #dce5e3;border-radius:14px;background:#fff;margin:16px 0;box-shadow:0 5px 20px #1231}.auto-panel p{margin:8px 0}.automatic-details{display:grid;grid-template-columns:max-content 1fr;gap:5px 14px;margin:14px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}.automatic-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.automatic-toggle{display:flex;align-items:center;gap:12px;white-space:nowrap}.automatic-switch{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}.automatic-switch input{appearance:none;position:relative;width:38px;height:22px;margin:0;border:0;border-radius:999px;background:#9eaaa7;cursor:pointer;transition:background .15s}.automatic-switch input::before{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0004;transition:transform .15s}.automatic-switch input:checked{background:#176b5f}.automatic-switch input:checked::before{transform:translateX(16px)}.automatic-switch input:focus-visible{outline:3px solid #88bdb4;outline-offset:2px}.automatic-switch input:disabled{cursor:not-allowed;opacity:.55}.count-list{color:#667874}.fields{display:grid;gap:18px}.fields label{display:grid;gap:7px;font-weight:600}.path-row input,select{width:100%;min-width:0;padding:10px;border:1px solid #bdcbc8;border-radius:7px;font:inherit}.path-row input{flex:1}button{border:1px solid #b8c8c4;background:#fff;border-radius:7px;padding:9px 13px;color:inherit;font:inherit;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#176b5f;border-color:#176b5f;color:#fff}.muted{color:#667874}.notice{color:#805a12}.error{color:#a33434}.valid{color:#15704e}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #e4ecea;overflow-wrap:anywhere}.confirm{display:flex;gap:9px;align-items:flex-start;margin:18px 0}.overlay{position:fixed;inset:0;background:#10201c77;display:grid;place-items:center;padding:18px}.browser{width:min(680px,100%);max-height:80vh;overflow:auto;background:#fff;border-radius:14px;padding:20px}.browser header{margin:0}.current-path{overflow-wrap:anywhere;color:#667874}.root-list{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}li{margin:5px 0}
+.manual-page{min-height:100vh}.automatic-details{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:12px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}
+@media(max-width:600px){.automatic-details{grid-template-columns:1fr;gap:2px}.automatic-details dd{margin-bottom:8px}}
 </style>

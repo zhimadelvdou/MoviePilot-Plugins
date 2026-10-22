@@ -19,11 +19,11 @@ def exact_tags(value: str | None) -> set[str]:
     return {tag.strip() for tag in str(value or "").split(",") if tag.strip()}
 
 
-def torrent_files(torrent, *, downloader: str, tag: str, roots: tuple[Path, ...], max_files: int = 500) -> tuple[Path, ...]:
+def torrent_files(torrent, *, downloader: str, tag: str | None, roots: tuple[Path, ...], max_files: int = 500) -> tuple[Path, ...]:
     """使用宿主已映射的 content_path/path；绝不再拼 raw save_path 或二次映射。"""
-    if not downloader or not tag or "," in tag or getattr(torrent, "downloader", None) != downloader:
+    if not downloader or (tag and "," in tag) or getattr(torrent, "downloader", None) != downloader:
         return ()
-    if tag not in exact_tags(getattr(torrent, "tags", None)):
+    if tag and tag not in exact_tags(getattr(torrent, "tags", None)):
         return ()
     progress = getattr(torrent, "progress", None)
     if not isinstance(progress, (int, float)) or not math.isfinite(progress) or progress < 100:

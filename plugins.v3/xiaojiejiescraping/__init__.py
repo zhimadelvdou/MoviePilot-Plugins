@@ -13,7 +13,8 @@ from app.sdk.plugin.base import _PluginBase
 from app.sdk.media import MediaInfo
 from app.sdk.services import DownloaderHelper
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
-from .core import SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, project_record, record_numbers, render_nfo
+from .core import (SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, project_record,
+                   project_actress_evidence, record_numbers, render_nfo)
 from .artwork import backdrop_candidates, is_usable_landscape
 from .provider import MankoProvider
 from .diagnostics import diagnose
@@ -31,6 +32,7 @@ from .automatic_api import api_routes as automatic_api_routes
 from app.schemas.types import TorrentStatus
 from .manual import ManualTransferWorkspace
 from .manual_api import api_routes as manual_api_routes
+from .layout import safe_component
 
 MATCH_MODES = frozenset({"tag", "path", "tag_or_path", "tag_and_path"})
 
@@ -40,7 +42,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.3"
+    plugin_version = "0.8.4"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -66,6 +68,7 @@ class XiaojiejieScraping(_PluginBase):
         self._tag = ""
         self._journal = None
         self._actor_images = False
+        self._actress_subfolder = False
         self._actor_index = None
         self._gfriends = GFriendsProvider()
         self._poll_lock = threading.Lock()
@@ -97,6 +100,7 @@ class XiaojiejieScraping(_PluginBase):
             self._tag = str(config.get("torrent_tag") or "").strip()
             self._dirs = tuple(Path(v) for v in self._lines(config.get("recognize_dirs")) if Path(v).is_absolute() and Path(v) != Path("/") and ".." not in Path(v).parts)
             self._actor_images = config.get("actor_images") is True
+            self._actress_subfolder = config.get("actress_subfolder") is True
             self._actor_index = JsonCache(self.get_data_path() / "actors-v1.json", max_entries=1, max_bytes=32 * 1024 * 1024) if self._enabled and self._actor_images else None
             self._image_hosts = tuple(v.lower() for v in self._lines(config.get("image_hosts")))
             with self._artwork_lock:
@@ -122,11 +126,13 @@ class XiaojiejieScraping(_PluginBase):
                         operation=str(config.get("transfer_type") or ""), roots=self._dirs,
                         sources=self._active_sources, ownership_ack=config.get("ownership_ack") is True,
                         auxiliary_ack=config.get("auxiliary_ack") is True,
+                        actress_subfolder=self._actress_subfolder,
                     )
-                    self._handoff = HandoffCoordinator(ledger, handoff_config, self.recognize_scoped)
+                    self._handoff = HandoffCoordinator(ledger, handoff_config, self.recognize_scoped,
+                                                       actress_evidence=self.actress_evidence)
                 except HandoffLedgerError:
                     self._handoff_error = "交接账本不可用，自动交接已阻止；不会重置或删除旧状态"
-            scope_signature = task_key({
+            scope_payload = {
                 "downloader": self._downloader, "torrent_tag": self._tag,
                 "storage": self._storage,
                 "roots": [str(root) for root in self._dirs],
@@ -134,7 +140,10 @@ class XiaojiejieScraping(_PluginBase):
                 "sources": list(self._active_sources),
                 "operation": str(config.get("transfer_type") or ""),
                 "match_mode": self._match_mode,
-            })
+            }
+            if self._actress_subfolder:
+                scope_payload["actress_subfolder"] = True
+            scope_signature = task_key(scope_payload)
             self._auto_guard = AutoTriggerGuard(self.get_data_path() / "auto-trigger.sqlite3")
             self._auto_guard.configure(active=self._enabled and self._discovery and self._storage == "local",
                                         new_only=self._auto_new_only,
@@ -664,7 +673,9 @@ class XiaojiejieScraping(_PluginBase):
                     diagnose(source, "accept", "configuration_changed")
                     return None
                 projected = project_record(record, actual_number, self._current_actors(packet), self._image_hosts, source=source)
-                cached = {"packet": packet, "projected": projected}
+                cached = {"packet": packet, "projected": projected,
+                          "actress_evidence": project_actress_evidence(
+                              packet.get("_actress_evidence"), actual_number)}
                 if persist:
                     cache.put(key, cached)
                     cache.put(source + ":id:" + str(record["_id"]), cached)
@@ -675,6 +686,33 @@ class XiaojiejieScraping(_PluginBase):
         except (OSError, TypeError, ValueError, KeyError, AttributeError):
             diagnose(source, "accept", "result_invalid")
             return None
+
+    def actress_evidence(self, media, number: str | None = None) -> tuple[list[str] | None, list[str]]:
+        """Return official names only from a validated plugin packet; intersect actors exactly."""
+        from .layout import actor_names
+        source = str(getattr(getattr(media, "media_source", None), "value", getattr(media, "media_source", "")))
+        identity = str(getattr(media, "media_id", "") or "")
+        if source != SOURCE or not IDENTIFIER.fullmatch(identity) or not self._cache:
+            return None, actor_names(media)
+        try:
+            cached = self._cache.get(source + ":id:" + identity)
+            packet = cached.get("packet") if isinstance(cached, dict) else None
+            evidence = cached.get("actress_evidence") if isinstance(cached, dict) else None
+            packet_number = packet.get("number") if isinstance(packet, dict) else None
+            expected = ("ADN" + str(number).upper().removeprefix("ADN-") if number is not None
+                        else "ADN" + str(packet_number or "").upper().removeprefix("ADN-"))
+            if (not isinstance(evidence, dict) or evidence.get("source") != "attackers-official"
+                    or evidence.get("number") != expected or not isinstance(evidence.get("names"), list)):
+                return None, actor_names(media)
+            names = [value for value in evidence["names"] if isinstance(value, str)
+                     and safe_component(value) == value]
+            if not names:
+                return None, actor_names(media)
+            actors = actor_names(media)
+            allowed = [name for name in names if name in actors]
+            return list(dict.fromkeys(names)), allowed
+        except Exception:
+            return None, actor_names(media)
 
     def recognize_scoped(self, context: RecognitionContext, meta=None, mtype=None, media_source=None, media_id=None, episode_group=None, cache=True) -> MediaInfo | None:
         """供插件筛选 qBittorrent 文件后调用；自动流程的 ID 回查也须在范围内。"""
@@ -886,6 +924,18 @@ class XiaojiejieScraping(_PluginBase):
         guard = self._auto_guard
         mode = self._handoff.config.mode if self._handoff else "discover"
         error = self._auto_error or self._handoff_error or None
+        counts = dict(self._auto_counts)
+        pending_actress_choices = []
+        if self._handoff:
+            try:
+                pending_actress_choices = [
+                    {"path": str(record["payload"].get("path", "")), "reason": "primary_actress_choice_required"}
+                    for record in self._handoff.ledger.list_records(("failed",), limit=10000)
+                    if record["payload"].get("reason") == "primary_actress_choice_required"
+                ][:20]
+                counts["primary_actress_choice_required"] = len(pending_actress_choices)
+            except HandoffLedgerError:
+                counts["primary_actress_choice_required"] = -1
         return {
             "enabled": bool(self._enabled and self._discovery and self._storage == "local"),
             "mode": mode,
@@ -899,7 +949,8 @@ class XiaojiejieScraping(_PluginBase):
             "roots": [str(root) for root in self._dirs],
             "target_path": str(self._handoff.config.target_path) if self._handoff else "",
             "last_poll_at": self._last_poll_at,
-            "counts": dict(self._auto_counts),
+            "counts": counts,
+            "pending_actress_choices": pending_actress_choices,
             "error": error,
         }
 
@@ -1023,7 +1074,13 @@ class XiaojiejieScraping(_PluginBase):
                 records = self._handoff.ledger.list_records(limit=10000)
                 for record in sorted(records, key=lambda item: item["updated_at"], reverse=True)[:20]:
                     payload = record["payload"]
-                    text = f"{labels.get(record['state'], record['state'])}：{payload.get('path', '')}；{payload.get('reason', '')}"
+                    reason = payload.get("reason", "")
+                    if reason == "primary_actress_choice_required":
+                        text = f"待人工选择女主演（自动准备已阻止，不会重试）：{payload.get('path', '')}"
+                    elif reason == "primary_actress_directory_invalid":
+                        text = f"女主演目录不安全，自动准备已阻止：{payload.get('path', '')}"
+                    else:
+                        text = f"{labels.get(record['state'], record['state'])}：{payload.get('path', '')}；{reason}"
                     rows.append({"component": "VAlert", "props": {"type": "info", "text": text}})
             except HandoffLedgerError:
                 rows.append({"component": "VAlert", "props": {"type": "error", "text": "账本无法安全读取，请勿删除后盲目重试"}})
@@ -1052,7 +1109,8 @@ class XiaojiejieScraping(_PluginBase):
             {"component": "VSwitch", "props": {"model": "auxiliary_ack", "label": "我理解宿主仍可能补充 TMDB 辅助字段；已核对预览并接受该原生行为"}},
             {"component": "VTextField", "props": {"model": "handoff_limit", "type": "number", "label": "每轮最多处理的新文件（1–5，默认1）"}},
             {"component": "VSwitch", "props": {"model": "actor_images", "label": "GFriends 演员缩略图（还需批准 raw.githubusercontent.com 图片主机）"}},
+            {"component": "VSwitch", "props": {"model": "actress_subfolder", "label": "按女主演分目录（不能唯一确认时等待人工选择）"}},
             {"component": "VTextarea", "props": {"model": "image_hosts", "label": "批准的图片 HTTPS 主机，每行一个；空值不提供图片地址"}},
             {"component": "VAlert", "props": {"type": "info", "text": "; ".join(status.label + ("：离线适配，未实站验收" if status.state == "offline_adapter" else "：暂不可用，现行接口待核实" if status.state == "blocked" else "：待实现") for status in PROVIDERS)}},
         ]
-        return fields, {"enabled": False, "sources": ["manko"], "storage": "local", "recognize_dirs": "", "automatic_match_mode": "tag_or_path", "image_hosts": "", "discovery_enabled": False, "auto_new_only": True, "downloader": "", "torrent_tag": "", "actor_images": False, "handoff_mode": "discover", "target_path": "", "transfer_type": "", "ownership_ack": False, "auxiliary_ack": False, "handoff_limit": 1}
+        return fields, {"enabled": False, "sources": ["manko"], "storage": "local", "recognize_dirs": "", "automatic_match_mode": "tag_or_path", "image_hosts": "", "discovery_enabled": False, "auto_new_only": True, "downloader": "", "torrent_tag": "", "actor_images": False, "actress_subfolder": False, "handoff_mode": "discover", "target_path": "", "transfer_type": "", "ownership_ack": False, "auxiliary_ack": False, "handoff_limit": 1}

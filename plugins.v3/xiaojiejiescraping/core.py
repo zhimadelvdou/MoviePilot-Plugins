@@ -14,6 +14,7 @@ import time
 import unicodedata
 from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
+from .layout import safe_component
 
 _PATH_LOCKS = {}
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -154,6 +155,26 @@ def project_record(record: dict, number: str, actors: list[dict], allowed_hosts:
             "directors": directors, "production_companies": companies, "category": "AV",
             "actors": [{"name": clean_text(a.get("name")), "type": "Actor", "profile_path": safe_image_url(a.get("profile_path"), allowed_hosts)} for a in actors if isinstance(a, dict) and a.get("name")],
             "names": [number], "genre_ids": []}
+
+
+def project_actress_evidence(value: dict | None, number: str) -> dict | None:
+    """Project only the exact provider-validated official actress marker for plugin use."""
+    match = re.fullmatch(r"ADN-(\d{1,7})", str(number or ""), re.I)
+    if not match or not isinstance(value, dict):
+        return None
+    expected = "ADN" + match.group(1)
+    names = value.get("names")
+    if (value.get("source") != "attackers-official" or value.get("number") != expected
+            or not isinstance(names, list) or not names):
+        return None
+    normalized = []
+    for name in names:
+        component = safe_component(name) if isinstance(name, str) else None
+        if component is None or component != name:
+            return None
+        if component not in normalized:
+            normalized.append(component)
+    return {"source": "attackers-official", "number": expected, "names": normalized}
 
 
 def render_nfo(info: dict, number: str) -> str:

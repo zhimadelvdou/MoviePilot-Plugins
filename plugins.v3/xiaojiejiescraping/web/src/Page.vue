@@ -9,6 +9,8 @@ const options = ref(null)
 const sourcePath = ref('')
 const targetPath = ref('')
 const mediaSource = ref('')
+const actressSubfolder = ref(false)
+const actressChoices = ref({})
 const preview = ref(null)
 const confirmed = ref(false)
 const busy = ref(false)
@@ -107,14 +109,21 @@ function invalidatePreview() {
 }
 function setPath(kind, path) {
   if (formLocked.value) return
-  if (kind === 'source') sourcePath.value = path
-  else targetPath.value = path
+  if (kind === 'source') { sourcePath.value = path; actressChoices.value = {} }
+  else { targetPath.value = path; actressChoices.value = {} }
   invalidatePreview()
 }
 function setMediaSource(value) {
   if (formLocked.value) return
   mediaSource.value = value
+  actressChoices.value = {}
   invalidatePreview()
+}
+function setActressSubfolder(value) {
+  if (formLocked.value || actressSubfolder.value === value) return
+  actressSubfolder.value = value === true
+  invalidatePreview()
+  actressChoices.value = {}
 }
 function executionOutcome(state) {
   if (state === 'completed') return 'completed'
@@ -151,6 +160,7 @@ async function loadOptions() {
   error.value = ''
   try {
     options.value = await props.api.get(endpoint('options'))
+    if (typeof options.value.actress_subfolder === 'boolean') actressSubfolder.value = options.value.actress_subfolder
     if (!targetPath.value) targetPath.value = options.value.default_target_path || ''
     if (!mediaSource.value) mediaSource.value = options.value.sources?.[0]?.value || ''
   } catch {
@@ -202,7 +212,8 @@ async function createPreview() {
   if (!options.value?.enabled || !sourcePath.value || !targetPath.value || !mediaSource.value || formLocked.value || previewBusy.value) return
   invalidatePreview()
   const generation = ++requestGeneration
-  const snapshot = { path: sourcePath.value, target_path: targetPath.value, media_source: mediaSource.value }
+  const snapshot = { path: sourcePath.value, target_path: targetPath.value, media_source: mediaSource.value,
+    actress_subfolder: actressSubfolder.value, actress_choices: { ...actressChoices.value } }
   previewBusy.value = true
   error.value = ''
   try {
@@ -404,6 +415,7 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
           <p>{{ automaticStatus.new_only ? '仅处理启用后完成的下载；历史完成任务跳过。' : '会包含启用前已完成的旧任务。' }}</p>
           <dl class="automatic-details"><dt>匹配方式</dt><dd>{{ automaticMatchModeLabel }}</dd><dt>下载器 / 标签</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.torrent_tag || '未设置' }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>来源目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
           <p v-if="automaticCounts.length">计数：<VChip v-for="([key, value]) in automaticCounts" :key="key" class="ma-1" size="x-small" variant="tonal">{{ key }} {{ value }}</VChip></p>
+          <VAlert v-for="pending in (automaticStatus.pending_actress_choices || [])" :key="pending.path" density="compact" type="warning" variant="tonal">待人工选择女主演：{{ pending.path }}。请在下方手动整理中选择该源并重新预览；自动流程不会重试。</VAlert>
           <VAlert v-if="automaticStatus.error" density="compact" type="error" variant="tonal">{{ automaticStatus.error }}</VAlert>
         </template>
         <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="automatic-refresh" variant="tonal" :loading="automaticStatusBusy" :disabled="automaticToggleBusy" @click="loadAutomaticStatus">只读刷新状态</VBtn><VBtn data-testid="automatic-check" variant="text" :loading="automaticCheckBusy" :disabled="automaticToggleBusy" @click="checkAutomaticConditions">检查触发条件（只读）</VBtn></div>
@@ -429,13 +441,14 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <VCol cols="12" md="6"><VTextField data-testid="target-path" label="目标媒体库目录" placeholder="/library/..." :model-value="targetPath" :disabled="formLocked" @update:model-value="setPath('target',$event)"><template #append><VBtn data-testid="browse-target" variant="tonal" :disabled="formLocked" @click="openBrowser('target')">浏览</VBtn></template></VTextField></VCol>
         <VCol cols="12"><p class="text-body-2">路径使用 MoviePilot 文件管理中可见的本地路径。整理方式为硬链接，要求来源与目标在同一文件系统；条件不满足时会显示错误，不会改为复制。目标影片目录会交给 MoviePilot 完成后续刮削。</p></VCol>
         <VCol cols="12" md="6"><VSelect data-testid="media-source" label="识别来源" :items="options?.sources || []" item-title="title" item-value="value" :model-value="mediaSource" :disabled="formLocked" @update:model-value="setMediaSource" /></VCol>
+        <VCol cols="12"><VSwitch data-testid="actress-subfolder" label="按女主演分目录" color="primary" hide-details :model-value="actressSubfolder" :disabled="formLocked" @update:model-value="setActressSubfolder" /><p class="text-body-2 mt-1">无法从官方资料唯一确认时，请从本片演员候选中选择后重新预览。</p></VCol>
       </VRow>
       <div class="d-flex flex-wrap align-center justify-space-between ga-3"><VChip variant="tonal">整理方式：硬链接（保留来源文件）</VChip><VBtn data-testid="preview" color="primary" :loading="previewBusy" :disabled="previewBusy || formLocked || !options?.enabled || !sourcePath || !targetPath || !mediaSource" @click="createPreview">识别并预览</VBtn></div>
     </VCardText></VCard>
     <VCard v-if="preview" class="mb-4" variant="outlined">
       <VCardTitle class="d-flex flex-wrap justify-space-between ga-3"><span>预览结果</span><VChip :color="previewExpired ? 'error' : 'success'" variant="tonal">{{ previewExpired ? '预览已过期' : `有效至 ${new Date(previewExpiryMs).toLocaleString()}` }}</VChip></VCardTitle>
       <VCardText><p>{{ preview.summary?.success || 0 }} 项可整理，{{ preview.summary?.failed || 0 }} 项失败</p>
-        <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}</td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
+        <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}<VSelect v-if="item.needs_actress_choice" :data-testid="`actress-choice-${index}`" class="mt-2" density="compact" label="演员候选（选择女主演）" :items="item.actor_candidates || []" :model-value="actressChoices[item.source] || null" :disabled="formLocked" @update:model-value="actressChoices[item.source] = $event" /></td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target || '—' }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
         <VCheckbox data-testid="confirm-transfer" :model-value="confirmed" label="我已核对预览，并确认按上述硬链接路径整理。" :disabled="!preview || previewExpired || formLocked" @update:model-value="confirmed = $event" />
         <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="execute" color="primary" :disabled="!canExecute" :loading="busy && outcome === 'pendingaccepted'" @click="execute">确认并整理</VBtn><VBtn v-if="outcome" data-testid="refresh-status" variant="tonal" :disabled="busy" :loading="busy" @click="refreshStatus">只读刷新状态</VBtn></div>
         <VAlert v-if="outcome === 'pendingaccepted'" class="mt-3" type="info" variant="tonal">请求已受理，正在等待结果。</VAlert><VAlert v-else-if="outcome === 'completed'" class="mt-3" type="success" variant="tonal">硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史</VAlert><VAlert v-else-if="outcome === 'failed'" class="mt-3" type="error" variant="tonal">整理失败，原任务已结束。</VAlert><VAlert v-else-if="outcome === 'unknown'" class="mt-3" type="error" variant="tonal">结果未知，不能重复提交。</VAlert>

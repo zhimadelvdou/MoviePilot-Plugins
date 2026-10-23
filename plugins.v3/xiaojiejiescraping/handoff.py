@@ -17,6 +17,7 @@ from app.schemas.types import MediaType
 
 from .ledger import HandoffLedger, task_key
 from .scope import RecognitionContext, matches_scope
+from .layout import child_directory, child_directory_matches
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,7 @@ class HandoffConfig:
     sources: tuple[str, ...] = ()
     ownership_ack: bool = False
     auxiliary_ack: bool = False
+    actress_subfolder: bool = False
 
     def target(self, roots: tuple[Path, ...] | None = None) -> Path | None:
         """目标必须为既有本地目录，且与所有输入目录双向不重叠。"""
@@ -56,9 +58,12 @@ class HandoffConfig:
 
     def signature(self) -> str:
         """配置变化不让旧排队记录沿用已撤销的目标或权限。"""
-        return task_key({"mode": self.mode, "target": self.target_path, "operation": self.operation,
-                         "roots": [str(root) for root in self.roots], "sources": list(self.sources),
-                         "ownership_ack": self.ownership_ack, "auxiliary_ack": self.auxiliary_ack})
+        payload = {"mode": self.mode, "target": self.target_path, "operation": self.operation,
+                   "roots": [str(root) for root in self.roots], "sources": list(self.sources),
+                   "ownership_ack": self.ownership_ack, "auxiliary_ack": self.auxiliary_ack}
+        if self.actress_subfolder:
+            payload["actress_subfolder"] = True
+        return task_key(payload)
 
 
 def native_transfer(**kwargs):
@@ -93,9 +98,11 @@ def _target_path(value, root: Path) -> Path | None:
 class HandoffCoordinator:
     """单文件预览/交接与只读核实；不重提已进入宿主或结果不确定的任务。"""
     def __init__(self, ledger: HandoffLedger, config: HandoffConfig, recognize: Callable,
-                 transfer: Callable = native_transfer, history: Callable = list_transfer_history):
+                 transfer: Callable = native_transfer, history: Callable = list_transfer_history,
+                 actress_evidence: Callable | None = None):
         self.ledger, self.config = ledger, config
         self.recognize, self.transfer, self.history = recognize, transfer, history
+        self.actress_evidence = actress_evidence
 
     def _admission(self, torrent, path: Path, scope_roots: tuple[Path, ...] | None = None,
                    match_mode: str | None = None):
@@ -185,7 +192,9 @@ class HandoffCoordinator:
                 return self._finish(key, "failed", "source_scope_or_configuration_changed")
             path = Path(payload["path"])
             meta = MetaInfo(path.name)
-            media = self.recognize(RecognitionContext("transfer", "local", str(path), scope_roots), meta=meta)
+            recognize_options = {"cache": False} if self.config.actress_subfolder else {}
+            media = self.recognize(RecognitionContext("transfer", "local", str(path), scope_roots),
+                                   meta=meta, **recognize_options)
             if (not media or media.type != MediaType.MOVIE or str(media.media_source) not in self.config.sources
                     or not media.media_id or str(media.media_id) == "0"):
                 return self._finish(key, "failed", "no_verified_metadata")
@@ -195,19 +204,35 @@ class HandoffCoordinator:
             meta.begin_season = meta.begin_episode = meta.end_episode = None
             meta.year = meta.year or media.year
             media.scrape_source = str(media.media_source)
+            effective_target = target
+            actress_name = None
+            actress_identity = None
+            if self.config.actress_subfolder:
+                evidence, allowed = self.actress_evidence(media, None) if self.actress_evidence else (None, [])
+                if evidence is None or len(evidence) != 1 or allowed != evidence:
+                    return self._finish(key, "failed", "primary_actress_choice_required")
+                actress_name = evidence[0]
+                child = child_directory(target, actress_name)
+                if child is None:
+                    return self._finish(key, "failed", "primary_actress_directory_invalid")
+                effective_target, actress_identity = child
             item = FileItem(storage="local", path=str(path), type="file", name=path.name,
                             basename=path.stem, extension=path.suffix.lstrip("."),
                             size=payload["size"], modify_time=payload["modify_time"])
-            continuation = lambda: can_continue() and self._source_valid(payload) and self.config.target(scope_roots) == target
+            def continuation():
+                child_valid = (not self.config.actress_subfolder or child_directory_matches(
+                    target, actress_name, actress_identity))
+                return (child_valid and can_continue() and self._source_valid(payload)
+                        and self.config.target(scope_roots) == target)
             directory = TransferDirectoryConf(
-                name="Xiaojiejie-Scraping", library_path=str(target), library_storage="local",
+                name="Xiaojiejie-Scraping", library_path=str(effective_target), library_storage="local",
                 transfer_type=self.config.operation, overwrite_mode="never", renaming=True,
                 scraping=True, notify=False, library_type_folder=False, library_category_folder=False,
             )
             request = dict(fileitem=item, meta=meta, mediainfo=media, mtype=MediaType.MOVIE,
                            target_directory=directory,
                            media_source=media.media_source, media_id=media.media_id,
-                           target_storage="local", target_path=target, transfer_type=self.config.operation,
+                           target_storage="local", target_path=effective_target, transfer_type=self.config.operation,
                            scrape=True, library_type_folder=False, library_category_folder=False,
                            downloader=payload["downloader"], download_hash=payload["download_hash"],
                            background=False, manual=False, force=False, sync_extra_files=False,
@@ -220,13 +245,15 @@ class HandoffCoordinator:
             if success is not True or not isinstance(items, list) or len(items) != 1:
                 return self._finish(key, "failed", "native_preview_not_single_success")
             result = items[0]
-            destination = _target_path(result.get("target"), target)
+            destination = _target_path(result.get("target"), effective_target)
             if (result.get("success") is not True or result.get("source") != str(path)
                     or result.get("source_storage") != "local" or destination is None
                     or destination.resolve() == path.resolve()):
                 return self._finish(key, "failed", "native_preview_outside_intent")
             facts = {"media_source": str(media.media_source), "media_id": str(media.media_id),
-                     "preview_target": str(destination)}
+                     "preview_target": str(destination), "actress_name": actress_name,
+                     "actress_root": str(effective_target),
+                     "actress_directory_identity": actress_identity}
             self.ledger.transition(key, ("preparing",), "preparing", facts)
             if self.config.mode == "preview":
                 return self._finish(key, "previewed", "preview_only_no_file_transfer")
@@ -305,7 +332,8 @@ class HandoffCoordinator:
                 continue
             if _value(row, "status") is True:
                 try:
-                    target = _target_path(payload["preview_target"], Path(payload["target_root"]))
+                    target = _target_path(payload["preview_target"],
+                                          Path(payload.get("actress_root") or payload["target_root"]))
                     if target is None or not target.is_file() or target.stat().st_size != payload["size"]:
                         continue
                 except OSError:

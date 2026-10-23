@@ -162,7 +162,17 @@ def plugin_host_context(monkeypatch):
 @pytest.fixture
 def offline_plugin(monkeypatch, tmp_path, sample_payload, plugin_host_context):
     """使用真实 V3 插件构造逻辑和明确的离线 provider 边界。"""
+    from app.chain.scraping import ScrapingChain
     from app.plugins.xiaojiejiescraping.transport import AnonymousRequestUtils
+
+    def release_scraping_chain():
+        instance = ScrapingChain.get_existing_instance()
+        if instance is not None:
+            ScrapingChain.release_existing_instance(instance)
+
+    # Every test installs a new ChainRuntimeContext. ScrapingChain is a process
+    # singleton and otherwise keeps the prior test's module/plugin dispatcher.
+    release_scraping_chain()
 
     monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
     monkeypatch.setattr(
@@ -175,6 +185,7 @@ def offline_plugin(monkeypatch, tmp_path, sample_payload, plugin_host_context):
     plugin_host_context.plugin_manager.set_plugin(plugin)
     yield plugin
     plugin.stop_service()
+    release_scraping_chain()
 
 
 def test_native_manual_preview_accepts_plugin_native_identity(offline_plugin, tmp_path, monkeypatch, request):
@@ -357,6 +368,7 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     )
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
 
+
     nfo_files = list(target.parent.glob("*.nfo"))
     assert len(nfo_files) == 1
     nfo = ET.parse(nfo_files[0]).getroot()
@@ -383,3 +395,246 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     assert target_images[background_name] == NATIVE_IMAGES["https://art.example.test/backdrop.jpg"]
     assert target_images["poster.jpg"] != target_images[background_name]
     assert set(image_client.urls) == set(NATIVE_IMAGES)
+
+
+def test_actress_folder_preview_without_official_choice_stops_before_native_transfer(
+    offline_plugin, tmp_path, sample_payload,
+):
+    """缺少官方唯一女優证据时，展示演员候选并先等人工选择。"""
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+
+    source = tmp_path / "downloads" / "TEST-123.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic video bytes")
+    library = tmp_path / "library"
+    library.mkdir()
+    offline_plugin.init_plugin({
+        "enabled": True,
+        "sources": ["manko"],
+        "storage": "local",
+        "recognize_dirs": str(source.parent),
+        "target_path": str(library),
+        "transfer_type": "link",
+        "handoff_mode": "discover",
+        "actress_subfolder": True,
+    })
+    offline_plugin._provider = OfflineMankoProvider(sample_payload)
+    calls = []
+    offline_plugin._manual.transfer = lambda **kwargs: calls.append(kwargs)
+
+    preview = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="manko",
+        transfer_type="link", library_category_folder=False,
+    ))
+
+    assert calls == []
+    assert preview.summary.success == 0
+    item = preview.items[0]
+    assert item.needs_actress_choice is True
+    assert item.actor_candidates == ["Synthetic <Actor> & Name"]
+
+
+def test_official_multiple_names_only_one_matching_actor_still_requires_manual_choice(
+    offline_plugin, tmp_path, monkeypatch,
+):
+    """官方女優行有多人时，即便当前媒体只列一人也不能推断唯一主演。"""
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+
+    source = tmp_path / "downloads" / "ADN-000775.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic video bytes")
+    library = tmp_path / "library"
+    library.mkdir()
+    packet = {
+        "number": "ADN-000775",
+        "record": {"_id": "fixture_native_123", "number": "ADN-000775", "title": "Synthetic Work"},
+        "actors": [{"name": "Synthetic Actress"}],
+        "_actress_evidence": {"source": "attackers-official", "number": "ADN000775",
+                              "names": ["Synthetic Actress", "Other Official Actress"]},
+    }
+
+    class ActressProvider:
+        def search(self, _number):
+            return deepcopy(packet)
+
+        def fetch(self, _identity):
+            return deepcopy(packet)
+
+    offline_plugin.init_plugin({"enabled": True, "sources": ["manko"], "storage": "local",
+        "recognize_dirs": str(source.parent), "target_path": str(library),
+        "transfer_type": "link", "handoff_mode": "discover"})
+    offline_plugin._provider = ActressProvider()
+    calls = []
+    offline_plugin._manual.transfer = lambda **kwargs: calls.append(kwargs)
+    preview = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="manko", actress_subfolder=True))
+
+    assert calls == []
+    assert preview.summary.success == 0
+    assert preview.items[0].needs_actress_choice is True
+    assert preview.items[0].actor_candidates == ["Synthetic Actress"]
+
+
+def test_manual_preview_auto_actress_choice_is_invalidated_if_official_evidence_gains_a_second_name(
+    offline_plugin, tmp_path,
+):
+    """预览时唯一官方女主演在 execute 前变成多人，必须停止且不调用原生整理。"""
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+
+    source = tmp_path / "downloads" / "ADN-000775.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic video bytes")
+    library = tmp_path / "library"
+    library.mkdir()
+    packet = {
+        "number": "ADN-000775",
+        "record": {"_id": "fixture_native_123", "number": "ADN-000775", "title": "Synthetic Work"},
+        "actors": [{"name": "Synthetic Actress"}],
+        "_actress_evidence": {"source": "attackers-official", "number": "ADN000775",
+                              "names": ["Synthetic Actress"]},
+    }
+
+    class ActressProvider:
+        def search(self, _number):
+            return deepcopy(packet)
+
+        def fetch(self, _identity):
+            return deepcopy(packet)
+
+    offline_plugin.init_plugin({"enabled": True, "sources": ["manko"], "storage": "local",
+        "recognize_dirs": str(source.parent), "target_path": str(library),
+        "transfer_type": "link", "handoff_mode": "discover"})
+    offline_plugin._provider = ActressProvider()
+    calls = []
+
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        if not kwargs["preview"]:
+            return True, "accepted"
+        target = Path(kwargs["target_path"]) / "Synthetic Work.mkv"
+        return True, {"items": [{"source": str(source), "source_storage": "local",
+            "target": str(target), "success": True}]}
+
+    offline_plugin._manual.transfer = transfer
+    preview = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="manko", actress_subfolder=True))
+    assert preview.summary.success == 1, preview
+    assert preview.items[0].selected_actress == "Synthetic Actress"
+
+    packet["actors"].append({"name": "Other Official Actress"})
+    packet["_actress_evidence"]["names"].append("Other Official Actress")
+    execution = offline_plugin._manual.execute(preview.preview_id)
+
+    assert execution.state == "failed", execution
+    assert len(calls) == 1 and calls[0]["preview"] is True
+
+
+def test_native_manual_actress_subfolder_preview_execute_and_scrapes(
+    offline_plugin, tmp_path, request, monkeypatch, sample_payload,
+):
+    """真实 SDK 在缺失女主演子目录时仍可预览，并将硬链接与刮削放入该目录。"""
+    import hashlib
+    import time
+    import xml.etree.ElementTree as ET
+
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+
+    number = "ADN-000775"
+    actress = "Synthetic Actress"
+    source = tmp_path / "downloads" / f"{number}.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic actress-folder video bytes")
+    source_before = source.stat()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    library = tmp_path / "library"
+    library.mkdir()
+    packet = deepcopy(sample_payload)
+    packet["number"] = number
+    packet["record"].update({
+        "_id": "fixture_native_775", "number": number, "title": "Synthetic Actress Work",
+        "title_display_name": [{"language": "en", "title": "Synthetic Actress Work"}],
+        "discription": [{"language": "en", "overview": "Synthetic actress folder plot"}],
+        "share_date": "2026-02-03T00:00:00Z", "runtime_minutes": 98,
+        "directors": [{"name": "Synthetic Director"}],
+        "production_companies": [{"name": "Synthetic Studio"}],
+        "backdrop_images": ["https://art.example.test/backdrop.jpg"],
+        "cover_image": "https://images.example.test/poster.jpg",
+    })
+    packet["actors"] = [{"name": actress}]
+    packet["_actress_evidence"] = {
+        "source": "attackers-official", "number": "ADN000775", "names": [actress],
+    }
+
+    class ActressProvider:
+        def search(self, found_number):
+            assert found_number == number
+            return deepcopy(packet)
+
+        def fetch(self, identity):
+            assert identity == "fixture_native_775"
+            return deepcopy(packet)
+
+    import app.chain.scraping as scraping_module
+
+    image_client = OfflineImageClient()
+    monkeypatch.setattr(scraping_module, "_scraping_http_snapshot", lambda: image_client)
+    offline_plugin.init_plugin({
+        "enabled": True, "sources": ["manko"], "storage": "local",
+        "recognize_dirs": str(source.parent), "target_path": str(library),
+        "transfer_type": "link", "handoff_mode": "discover",
+        "image_hosts": ["images.example.test", "art.example.test"],
+        "actress_subfolder": False,
+    })
+    offline_plugin._provider = ActressProvider()
+
+    preview = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="manko",
+        actress_subfolder=True,
+    ))
+    assert preview.summary.success == 1, preview
+    assert preview.preview_id
+    expected_target = Path(preview.items[0].target)
+    assert expected_target.is_relative_to(library / actress)
+    assert preview.items[0].selected_actress == actress
+    assert not (library / actress).exists()
+    assert not expected_target.exists()
+
+    from app.runtime.events import EventManager
+    from app.startup.initializers.modules import configure_host_event_handler_resolver
+
+    event_manager = EventManager()
+    configure_host_event_handler_resolver()
+    event_manager.start()
+    request.addfinalizer(event_manager.stop)
+    chain_probe = TransferChain()
+    request.addfinalizer(chain_probe.close_workers)
+    execution = offline_plugin._manual.execute(preview.preview_id)
+    assert execution.state in ("accepted", "completed"), execution
+
+    deadline = time.monotonic() + 10
+    status = offline_plugin._manual.status(preview.preview_id)
+    while time.monotonic() < deadline:
+        nfo_files = list(expected_target.parent.glob("*.nfo"))
+        image_files = [path for path in expected_target.parent.glob("*.jpg") if path.is_file()]
+        if expected_target.exists() and nfo_files and len(image_files) >= 2 and status.state == "completed":
+            break
+        status = offline_plugin._manual.status(preview.preview_id)
+        time.sleep(0.05)
+    assert status.state == "completed", status
+    assert expected_target.is_file()
+    after = source.stat()
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        source_before.st_dev, source_before.st_ino, source_before.st_size, source_before.st_mtime_ns,
+    )
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
+    target_stat = expected_target.stat()
+    assert (target_stat.st_dev, target_stat.st_ino) == (source_before.st_dev, source_before.st_ino)
+    nfo = ET.parse(next(expected_target.parent.glob("*.nfo"))).getroot()
+    assert nfo.findtext("director") == "Synthetic Director"
+    assert nfo.findtext("studio") == "Synthetic Studio"
+    assert nfo.findtext("runtime") == "98"
+    assert [actor.findtext("name") for actor in nfo.findall("actor")] == [actress]
+    images = {path.name: path.read_bytes() for path in expected_target.parent.glob("*.jpg")}
+    assert images["poster.jpg"] == NATIVE_IMAGES["https://images.example.test/poster.jpg"]
+    background = "backdrop.jpg" if "backdrop.jpg" in images else "fanart.jpg"
+    assert images[background] == NATIVE_IMAGES["https://art.example.test/backdrop.jpg"]

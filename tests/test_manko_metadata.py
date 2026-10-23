@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import sys
 from pathlib import Path
 import unittest
 from xml.etree import ElementTree as ET
 
 
-CORE_PATH = Path(__file__).resolve().parents[1] / "plugins.v3" / "xiaojiejiescraping" / "core.py"
-SPEC = importlib.util.spec_from_file_location("manko_metadata_core_under_test", CORE_PATH)
+PLUGIN_PATH = Path(__file__).resolve().parents[1] / "plugins.v3" / "xiaojiejiescraping"
+CORE_PATH = PLUGIN_PATH / "core.py"
+PACKAGE_NAME = "manko_metadata_core_under_test"
+PACKAGE_SPEC = importlib.util.spec_from_loader(PACKAGE_NAME, loader=None, is_package=True)
+package = importlib.util.module_from_spec(PACKAGE_SPEC)
+package.__path__ = [str(PLUGIN_PATH)]
+sys.modules[PACKAGE_NAME] = package
+SPEC = importlib.util.spec_from_file_location(f"{PACKAGE_NAME}.core", CORE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load plugin core from {CORE_PATH}")
 core = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = core
 SPEC.loader.exec_module(core)
 
 

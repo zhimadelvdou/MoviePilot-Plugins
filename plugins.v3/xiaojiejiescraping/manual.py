@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from app.sdk.media import MetaInfo
 from app.schemas.file import FileItem
 from app.schemas.system import TransferDirectoryConf
@@ -17,6 +17,7 @@ from .core import NUMBER, normalize_number
 from .discovery import VIDEO_EXTENSIONS
 from .handoff import native_transfer, _fingerprint, _target_path
 from .ledger import HandoffLedger, task_key
+from .layout import actor_names, child_directory, child_directory_matches, safe_component
 
 MAX_SCAN_ENTRIES = 1000
 MAX_VIDEO_FILES = 50
@@ -29,6 +30,7 @@ class ManualOptions(BaseModel):
     roots: list[str]
     default_target_path: str | None = None
     transfer_type: str = "link"
+    actress_subfolder: bool = False
 
 
 class ManualBrowseItem(BaseModel):
@@ -50,6 +52,8 @@ class ManualPreviewRequest(BaseModel):
     media_source: str
     transfer_type: str = "link"
     library_category_folder: bool = False
+    actress_subfolder: bool | None = None
+    actress_choices: dict[str, str] = Field(default_factory=dict)
 
 
 class ManualPreviewItem(BaseModel):
@@ -61,6 +65,9 @@ class ManualPreviewItem(BaseModel):
     poster_path: str | None = None
     success: bool
     message: str | None = None
+    actor_candidates: list[str] = Field(default_factory=list)
+    needs_actress_choice: bool = False
+    selected_actress: str | None = None
 
 
 class ManualSummary(BaseModel):
@@ -181,12 +188,18 @@ class ManualTransferWorkspace:
     def _selected_target(self, value: str, source_roots: tuple[Path, ...] = ()) -> Path | None:
         return _target_root(value, source_roots)
 
-    def _config_signature(self) -> str:
-        return task_key({
+    def _config_signature(self, effective_actress_subfolder: bool | None = None) -> str:
+        payload = {
             "enabled": self._active(),
             "storage": self.plugin._storage,
             "sources": list(self.plugin._active_sources),
-        })
+        }
+        if self.plugin._actress_subfolder:
+            payload["actress_subfolder"] = True
+        if (effective_actress_subfolder is not None
+                and effective_actress_subfolder != self.plugin._actress_subfolder):
+            payload["manual_actress_subfolder"] = effective_actress_subfolder
+        return task_key(payload)
 
     def _source_matches(self, intent: dict) -> bool:
         path = Path(intent["source"])
@@ -216,7 +229,8 @@ class ManualTransferWorkspace:
         target_path = self._configured_target()
         return ManualOptions(enabled=self._active(), sources=self._source_names(),
                              roots=[str(root) for root in roots],
-                             default_target_path=str(target_path) if target_path else None)
+                             default_target_path=str(target_path) if target_path else None,
+                             actress_subfolder=self.plugin._actress_subfolder)
 
     def _ledger_db(self) -> HandoffLedger:
         if self._ledger is None:
@@ -364,7 +378,13 @@ class ManualTransferWorkspace:
         files = self._scan(source, source_roots)
         now = time.time()
         preview_id = str(uuid.uuid4())
-        config_signature = self._config_signature()
+        actress_subfolder = (self.plugin._actress_subfolder if request.actress_subfolder is None
+                             else request.actress_subfolder)
+        config_signature = self._config_signature(actress_subfolder)
+        if not isinstance(request.actress_choices, dict) or any(
+                not isinstance(source_path, str) or not isinstance(name, str)
+                for source_path, name in request.actress_choices.items()):
+            raise ValueError("演员选择格式无效")
         items: list[ManualPreviewItem] = []
         intents = []
         for path in files:
@@ -378,36 +398,78 @@ class ManualTransferWorkspace:
                                                message="源文件与目标目录不在同一卷，无法创建硬链接"))
                 continue
             media = self.plugin.recognize_media(meta=self._meta(path, number), mtype=MediaType.MOVIE,
-                                                media_source=request.media_source)
+                                                media_source=request.media_source,
+                                                cache=not actress_subfolder)
             if (not media or str(self._value(media, "media_source")) != request.media_source
                     or not self._value(media, "media_id")):
                 items.append(ManualPreviewItem(source=str(path), success=False,
                                                message="所选来源未能确认唯一媒体身份"))
                 continue
+            selected_actress = None
+            actress_choice_mode = None
+            effective_target = target
+            actress_identity = None
+            candidates = []
+            if actress_subfolder:
+                official_names, allowed_official = self.plugin.actress_evidence(media, number)
+                names_in_media = actor_names(media)
+                candidates = allowed_official if official_names is not None else names_in_media
+                requested_actress = request.actress_choices.get(str(path))
+                if requested_actress is not None and requested_actress in candidates:
+                    selected_actress = requested_actress
+                    actress_choice_mode = "manual"
+                elif (official_names is not None and len(official_names) == 1
+                      and allowed_official == official_names):
+                    selected_actress = official_names[0]
+                    actress_choice_mode = "official_unique"
+                if selected_actress is None:
+                    items.append(ManualPreviewItem(
+                        source=str(path), title=self._value(media, "title"),
+                        media_source=request.media_source, media_id=str(media.media_id),
+                        poster_path=self._value(media, "poster_path"), success=False,
+                        message="请从本片演员候选中选择女主演后重新预览",
+                        actor_candidates=candidates, needs_actress_choice=True))
+                    continue
+                selected_actress = safe_component(selected_actress)
+                child = child_directory(target, selected_actress) if selected_actress else None
+                if child is None:
+                    items.append(ManualPreviewItem(source=str(path), success=False,
+                        message="女主演目录名或现有目录不安全；未调用原生预览"))
+                    continue
+                effective_target, actress_identity = child
             try:
                 success, result = self.transfer(**self._native_request(
-                    path, target, request.media_source, number, media, preview=True))
+                    path, effective_target, request.media_source, number, media, preview=True))
             except Exception:
                 success, result = False, None
             rows = result.get("items") if isinstance(result, dict) else None
             row = rows[0] if isinstance(rows, list) and len(rows) == 1 else None
-            destination = _target_path(row.get("target"), target) if isinstance(row, dict) else None
+            destination = _target_path(row.get("target"), effective_target) if isinstance(row, dict) else None
             ok = bool(success is True and row and row.get("success") is True
                       and row.get("source") == str(path) and row.get("source_storage") == "local"
                       and destination is not None and destination != path
+                      and (not actress_subfolder or child_directory_matches(
+                          target, selected_actress, actress_identity))
                       and not destination.exists() and not destination.is_symlink())
             items.append(ManualPreviewItem(
                 source=str(path), target=str(destination) if destination else None,
                 title=self._value(media, "title"), media_source=request.media_source,
                 media_id=str(media.media_id), poster_path=self._value(media, "poster_path"),
-                success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标"))
+                success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标",
+                selected_actress=selected_actress, actor_candidates=candidates))
             if ok:
                 intents.append({"source": str(path), "target": str(destination),
                                 "source_stat": _fingerprint(path), "source_root": str(source_roots[0]),
                                 "source_root_identity": _directory_identity(source_roots[0]),
                                 "media_source": request.media_source,
                                 "media_id": str(media.media_id), "number": number,
-                                "config_signature": config_signature})
+                                "config_signature": config_signature,
+                                "actress_subfolder": actress_subfolder,
+                                "actress_name": selected_actress,
+                                "actress_choice_mode": actress_choice_mode,
+                                "actress_root": str(effective_target),
+                                "actress_parent_root": str(target),
+                                "actress_directory_identity": actress_identity})
         target_groups: dict[str, list[int]] = {}
         for index, item in enumerate(items):
             if item.success and item.target:
@@ -501,6 +563,11 @@ class ManualTransferWorkspace:
                         ("st_size", "size"), ("st_mtime_ns", "mtime_ns")))):
                 return False
             root = Path(intent["payload"]["target_root"]).resolve(strict=True)
+            intent_payload = intent["payload"]
+            if (intent_payload.get("actress_subfolder") and not child_directory_matches(
+                    Path(intent_payload["actress_parent_root"]), intent_payload["actress_name"],
+                    intent_payload.get("actress_directory_identity"), allow_created=True)):
+                return False
             if (not target.is_absolute() or ".." in target.parts or target == root
                     or not target.is_relative_to(root) or not target.resolve(strict=True).is_relative_to(root)
                     or target.is_symlink() or not target.is_file()):
@@ -523,7 +590,8 @@ class ManualTransferWorkspace:
         failed = (not self._active() or not target
                   or payload.get("generation") != self.plugin._generation
                   or payload.get("boot_id") != self._boot_id
-                  or payload.get("config_signature") != self._config_signature()
+                  or payload.get("config_signature") != self._config_signature(
+                      payload["items"][0].get("actress_subfolder") if payload.get("items") else None)
                   or not self._target_matches(payload, target)
                   or now >= payload.get("expires_at", 0))
         if not failed:
@@ -542,8 +610,23 @@ class ManualTransferWorkspace:
                             or str(self._value(media, "media_id")) != intent["media_id"]):
                         failed = True
                         break
+                    effective_target = Path(intent.get("actress_root") or target)
+                    if intent.get("actress_subfolder"):
+                        official_names, allowed = self.plugin.actress_evidence(media, intent["number"])
+                        if intent.get("actress_choice_mode") == "official_unique":
+                            valid_name = (official_names is not None and len(official_names) == 1
+                                          and allowed == official_names
+                                          and official_names[0] == intent.get("actress_name"))
+                        else:
+                            candidates_now = allowed if official_names is not None else actor_names(media)
+                            valid_name = intent.get("actress_name") in candidates_now
+                        if (not valid_name or not child_directory_matches(
+                                target, intent["actress_name"], intent.get("actress_directory_identity"))
+                                or child_directory(target, intent["actress_name"])[0] != effective_target):
+                            failed = True
+                            break
                     preview_ok, preview = self.transfer(**self._native_request(
-                        path, target, intent["media_source"], intent["number"], media, preview=True))
+                        path, effective_target, intent["media_source"], intent["number"], media, preview=True))
                     rows = preview.get("items") if isinstance(preview, dict) else None
                     if (preview_ok is not True or not isinstance(rows, list) or len(rows) != 1
                             or rows[0].get("success") is not True or rows[0].get("target") != intent["target"]
@@ -564,7 +647,8 @@ class ManualTransferWorkspace:
                             "source_version": version, "media_source": intent["media_source"],
                             "media_id": intent["media_id"], "target": intent["target"]})
             intent["intent_key"] = key
-            file_entries.append((key, {"kind": "manual_file_intent", "target_root": str(target), **intent}))
+            file_entries.append((key, {"kind": "manual_file_intent",
+                                       "target_root": intent.get("actress_root") or str(target), **intent}))
         if not self._ledger_db().transition(preview_id, ("preparing",), "preparing",
                                             {"items": payload["items"]}):
             return self.status(preview_id)
@@ -589,10 +673,13 @@ class ManualTransferWorkspace:
                 path = Path(intent["source"])
                 if (not self._active() or payload.get("generation") != self.plugin._generation
                         or intent["media_source"] not in self.plugin._active_sources
-                        or intent["config_signature"] != self._config_signature()
+                        or intent["config_signature"] != self._config_signature(
+                            intent.get("actress_subfolder"))
                         or payload.get("boot_id") != self._boot_id
                         or not self._source_matches(intent)
                         or not self._target_matches(payload, target)
+                        or (intent.get("actress_subfolder") and not child_directory_matches(
+                            target, intent["actress_name"], intent.get("actress_directory_identity")))
                         or Path(intent["target"]).exists() or Path(intent["target"]).is_symlink()):
                     raise RuntimeError("源文件提交前发生变化")
                 media = self.plugin.recognize_media(meta=self._meta(path, intent["number"]),
@@ -601,21 +688,38 @@ class ManualTransferWorkspace:
                 if (not media or str(self._value(media, "media_source")) != intent["media_source"]
                         or str(self._value(media, "media_id")) != intent["media_id"]):
                     raise RuntimeError("提交时原生身份回查不一致")
+                effective_target = Path(intent.get("actress_root") or target)
+                if intent.get("actress_subfolder"):
+                    official_names, allowed = self.plugin.actress_evidence(media, intent["number"])
+                    if intent.get("actress_choice_mode") == "official_unique":
+                        valid_name = (official_names is not None and len(official_names) == 1
+                                      and allowed == official_names
+                                      and official_names[0] == intent.get("actress_name"))
+                    else:
+                        candidates_now = allowed if official_names is not None else actor_names(media)
+                        valid_name = intent.get("actress_name") in candidates_now
+                    if (not valid_name or not child_directory_matches(
+                            target, intent["actress_name"], intent.get("actress_directory_identity"))):
+                        raise RuntimeError("提交时女主演证据或子目录已变化")
                 if (payload.get("generation") != self.plugin._generation
                         or not self._active() or intent["media_source"] not in self.plugin._active_sources
-                        or intent["config_signature"] != self._config_signature()
+                        or intent["config_signature"] != self._config_signature(
+                            intent.get("actress_subfolder"))
                         or not self._source_matches(intent) or not self._target_matches(payload, target)):
                     raise RuntimeError("提交前插件代次或交接范围已变化")
                 def continue_callback(intent=intent, payload=payload, target=target, path=path,
                                       generation=payload["generation"]):
-                    return (self._active() and payload.get("generation") == generation
+                    child_ok = (not intent.get("actress_subfolder") or child_directory_matches(
+                        target, intent["actress_name"], intent.get("actress_directory_identity")))
+                    return (child_ok and self._active() and payload.get("generation") == generation
                             and self.plugin._generation == generation
                             and intent["media_source"] in self.plugin._active_sources
                             and payload.get("boot_id") == self._boot_id
-                            and intent["config_signature"] == self._config_signature()
+                            and intent["config_signature"] == self._config_signature(
+                                intent.get("actress_subfolder"))
                             and self._source_matches(intent)
                             and self._target_matches(payload, target))
-                result = self.transfer(**self._native_request(path, target, intent["media_source"],
+                result = self.transfer(**self._native_request(path, effective_target, intent["media_source"],
                                                                intent["number"], media, preview=False),
                                        continue_callback=continue_callback)
                 if not isinstance(result, tuple) or not result or result[0] is not True:

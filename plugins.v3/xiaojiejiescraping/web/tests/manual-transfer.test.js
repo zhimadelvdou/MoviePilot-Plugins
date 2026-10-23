@@ -26,10 +26,10 @@ const selectValueFromMenu = async (wrapper, id, title) => {
   await flushPromises()
 }
 const setSwitch = async (wrapper, id, value) => { await switchComponent(wrapper, id).vm.$emit('update:modelValue', value); await flushPromises() }
-const setup = ({ automaticEnabled = false, newOnly = true } = {}) => {
+const setup = ({ automaticEnabled = false, newOnly = true, optionsValue = options } = {}) => {
   let pluginConfig = { ...initialPluginConfig, auto_new_only: newOnly, discovery_enabled: automaticEnabled }
   const api = {
-    get: vi.fn(async (url) => url.endsWith('/options') ? options
+    get: vi.fn(async (url) => url.endsWith('/options') ? optionsValue
       : url.endsWith('/automatic/status') ? { ...automaticStatus, new_only: pluginConfig.auto_new_only, enabled: pluginConfig.discovery_enabled }
         : url === 'plugin/plugin-x' ? { success: true, message: '', data: { ...pluginConfig } }
           : { state: 'completed', items: [], summary: {} }),
@@ -60,6 +60,137 @@ describe('manual transfer page', () => {
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({ path: '/downloads/TEST-123-C', target_path: '/library', media_source: 'manko', transfer_type: 'link' }))
     expect(wrapper.text()).toContain('ID-123')
+  })
+
+  it('inherits the configured actress-folder option and includes it in a fresh preview', async () => {
+    const { api, wrapper } = setup({ optionsValue: { ...options, actress_subfolder: true } })
+    await flushPromises()
+    expect(switchComponent(wrapper, 'actress-subfolder').props('modelValue')).toBe(true)
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({
+      path: '/downloads/ADN-000775.mkv', actress_subfolder: true, actress_choices: {},
+    }))
+  })
+
+  it('sends a chosen actor on a new preview after the candidate list requests a choice', async () => {
+    const { api, wrapper } = setup()
+    const choicePreview = {
+      preview_id: null, expires_at: null,
+      items: [{ source: '/downloads/ADN-000775.mkv', title: '影片', success: false,
+        needs_actress_choice: true, actor_candidates: ['女優甲', '女優乙'] }],
+      summary: { total: 1, success: 0, failed: 1 },
+    }
+    let previewCount = 0
+    api.post.mockImplementation(async url => url.endsWith('/preview')
+      ? (++previewCount === 1 ? choicePreview : goodPreview)
+      : ({ state: 'completed', items: [], summary: {} }))
+    await flushPromises()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await setSwitch(wrapper, 'actress-subfolder', true)
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('请从本片演员候选中选择后重新预览')
+    await selectValue(wrapper, 'actress-choice-0', '女優乙')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenLastCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({
+      actress_subfolder: true, actress_choices: { '/downloads/ADN-000775.mkv': '女優乙' },
+    }))
+  })
+
+  it('keeps other file choices visible and sends per-file selections together', async () => {
+    const { api, wrapper } = setup()
+    const choicePreview = {
+      items: [
+        { source: '/downloads/ADN-000775-A.mkv', title: '影片甲', success: false,
+          needs_actress_choice: true, actor_candidates: ['女優甲', '女優乙'] },
+        { source: '/downloads/ADN-000775-B.mkv', title: '影片乙', success: false,
+          needs_actress_choice: true, actor_candidates: ['女優丙', '女優丁'] },
+      ], summary: { total: 2, success: 0, failed: 2 },
+    }
+    api.post.mockImplementation(async url => url.endsWith('/preview') ? choicePreview : ({ state: 'completed' }))
+    await flushPromises()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/batch')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await setSwitch(wrapper, 'actress-subfolder', true)
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    await selectValue(wrapper, 'actress-choice-0', '女優乙')
+    expect(wrapper.findAllComponents(vuetifyComponents.VSelect)
+      .filter(component => (component.attributes('data-testid') || '').startsWith('actress-choice-'))).toHaveLength(2)
+    await selectValue(wrapper, 'actress-choice-1', '女優丁')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenLastCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({
+      actress_choices: {
+        '/downloads/ADN-000775-A.mkv': '女優乙',
+        '/downloads/ADN-000775-B.mkv': '女優丁',
+      },
+    }))
+  })
+
+  it('clears actor choices when source, target, metadata source, or folder mode changes', async () => {
+    const { api, wrapper } = setup({ optionsValue: {
+      ...options, sources: [...options.sources, { title: 'FANZA', value: 'fanza' }],
+    } })
+    const choicePreview = {
+      items: [{ source: '/downloads/ADN-000775.mkv', title: '影片', success: false,
+        needs_actress_choice: true, actor_candidates: ['女優甲'] }],
+      summary: { total: 1, success: 0, failed: 1 },
+    }
+    api.post.mockImplementation(async url => url.endsWith('/preview') ? choicePreview : ({}))
+    await flushPromises()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await setSwitch(wrapper, 'actress-subfolder', true)
+    const chooseAndVerifyEmpty = async () => {
+      await wrapper.get('[data-testid="preview"]').trigger('click')
+      await flushPromises()
+      expect(api.post.mock.calls.at(-1)[1].actress_choices).toEqual({})
+      await selectValue(wrapper, 'actress-choice-0', '女優甲')
+    }
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    await selectValue(wrapper, 'actress-choice-0', '女優甲')
+    await inputFor(wrapper, 'target-path').setValue('/library/changed')
+    await chooseAndVerifyEmpty()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/changed')
+    await chooseAndVerifyEmpty()
+    await selectValueFromMenu(wrapper, 'media-source', 'FANZA')
+    await chooseAndVerifyEmpty()
+    await setSwitch(wrapper, 'actress-subfolder', false)
+    await chooseAndVerifyEmpty()
+  })
+
+  it('ignores an old preview response after the actress-folder setting changes', async () => {
+    const { api, wrapper } = setup()
+    const pending = deferred()
+    api.post.mockImplementation(url => url.endsWith('/preview') ? pending.promise : Promise.resolve({}))
+    await flushPromises()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    await setSwitch(wrapper, 'actress-subfolder', true)
+    pending.resolve({ ...goodPreview, preview_id: 'stale-actress-preview' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('stale-actress-preview')
+    expect(wrapper.text()).not.toContain('ID-123')
+  })
+
+  it('shows automatic files blocked for manual actress choice without retrying them', async () => {
+    const { api, wrapper } = setup()
+    api.get.mockImplementation(async url => url.endsWith('/options') ? options
+      : url.endsWith('/automatic/status') ? { ...automaticStatus,
+        pending_actress_choices: [{ path: '/downloads/ADN-000775.mkv', reason: 'primary_actress_choice_required' }] }
+        : url === 'plugin/plugin-x' ? { success: true, message: '', data: { ...initialPluginConfig } } : {})
+    await flushPromises()
+    expect(wrapper.text()).toContain('待人工选择女主演：/downloads/ADN-000775.mkv')
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('shows automatic triggering as disabled without enabling or executing anything', async () => {
@@ -474,7 +605,7 @@ describe('manual transfer page', () => {
 })
 
 it('config edits preserve every original and unknown setting in the saved object', async () => {
-  const initialConfig = { enabled: false, sources: ['manko'], storage: 'local', recognize_dirs: '', image_hosts: '', discovery_enabled: false, downloader: '', torrent_tag: '', actor_images: false, handoff_mode: 'discover', target_path: '', transfer_type: '', ownership_ack: false, auxiliary_ack: false, handoff_limit: 1, future_key: { keep: true } }
+  const initialConfig = { enabled: false, sources: ['manko'], storage: 'local', recognize_dirs: '', image_hosts: '', discovery_enabled: false, downloader: '', torrent_tag: '', actor_images: false, actress_subfolder: false, handoff_mode: 'discover', target_path: '', transfer_type: '', ownership_ack: false, auxiliary_ack: false, handoff_limit: 1, future_key: { keep: true } }
   const wrapper = mount(Config, { ...vuetifyOptions(), props: { initialConfig } })
   mounted.push(wrapper)
   expect(inputFor(wrapper, 'config-auto_new_only').element.checked).toBe(true)
@@ -484,6 +615,9 @@ it('config edits preserve every original and unknown setting in the saved object
   expect(wrapper.emitted('save')[0][0]).toMatchObject({ ...initialConfig, enabled: true, auto_new_only: true })
   expect(wrapper.emitted('save')[0][0].auto_new_only).toBe(true)
   expect(selectComponent(wrapper, 'config-automatic-match-mode').props('modelValue')).toBe('tag_and_path')
+  await setSwitch(wrapper, 'config-actress_subfolder', true)
+  await wrapper.get('[data-testid="config-save"]').trigger('click')
+  expect(wrapper.emitted('save')[1][0].actress_subfolder).toBe(true)
 })
 
 it('defaults a new configuration to OR matching while preserving all fields on save', async () => {

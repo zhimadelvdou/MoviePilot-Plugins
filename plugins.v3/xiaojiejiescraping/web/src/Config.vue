@@ -6,7 +6,7 @@ const props = defineProps({ initialConfig: { type: Object, default: () => ({}) }
 const hostTheme = useTheme()
 const hostThemeName = computed(() => hostTheme.global.name.value)
 const emit = defineEmits(['save', 'close'])
-const defaults = { enabled: false, sources: ['manko'], storage: 'local', recognize_dirs: '', image_hosts: '', discovery_enabled: false, auto_new_only: true, automatic_match_mode: 'tag_or_path', downloader: '', torrent_tag: '', actor_images: false, handoff_mode: 'discover', target_path: '', transfer_type: '', ownership_ack: false, auxiliary_ack: false, handoff_limit: 1 }
+const defaults = { enabled: false, sources: ['manko'], storage: 'local', recognize_dirs: '', image_hosts: '', discovery_enabled: false, auto_new_only: true, automatic_match_mode: 'tag_or_path', downloader: '', torrent_tag: '', actor_images: false, actress_subfolder: false, handoff_mode: 'discover', target_path: '', transfer_type: '', ownership_ack: false, auxiliary_ack: false, handoff_limit: 1 }
 function configDefaults(value) {
   const config = value || {}
   return { ...defaults, ...(Object.keys(config).length && !Object.prototype.hasOwnProperty.call(config, 'automatic_match_mode') ? { automatic_match_mode: 'tag_and_path' } : {}), ...config }
@@ -14,7 +14,7 @@ function configDefaults(value) {
 const model = reactive(configDefaults(props.initialConfig))
 watch(() => props.initialConfig, (value) => Object.assign(model, configDefaults(value)), { deep: true })
 const sourceText = computed({ get: () => Array.isArray(model.sources) ? model.sources.join(', ') : '', set: value => { model.sources = value.split(',').map(item => item.trim()).filter(Boolean) } })
-const boolFields = [['enabled','启用已完成的来源能力'],['discovery_enabled','启用下载完成轮询（每5分钟）'],['auto_new_only','仅处理启用后完成的下载'],['actor_images','启用演员缩略图'],['ownership_ack','已排除 MoviePilot 原生自动监控'],['auxiliary_ack','已理解宿主可能补充辅助字段']]
+const boolFields = [['enabled','启用已完成的来源能力'],['discovery_enabled','启用下载完成轮询（每5分钟）'],['auto_new_only','仅处理启用后完成的下载'],['actress_subfolder','按女主演分目录'],['actor_images','启用演员缩略图'],['ownership_ack','已排除 MoviePilot 原生自动监控'],['auxiliary_ack','已理解宿主可能补充辅助字段']]
 </script>
 
 <template>

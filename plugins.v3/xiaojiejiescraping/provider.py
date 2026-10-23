@@ -95,6 +95,17 @@ class MankoProvider:
                 value = extra.get(key)
                 if isinstance(value, list):
                     record[key] = value
+        evidence = extra.get("_actress_evidence")
+        expected = "ADN" + str(packet.get("number", "")).removeprefix("ADN-")
+        names = evidence.get("names") if isinstance(evidence, dict) else None
+        if (isinstance(evidence, dict) and evidence.get("source") == "attackers-official"
+                and evidence.get("number") == expected and isinstance(names, list)
+                and names and all(isinstance(name, str) and name.strip() and len(name) <= 200
+                                  for name in names)):
+            packet["_actress_evidence"] = {
+                "source": "attackers-official", "number": expected,
+                "names": list(dict.fromkeys(name.strip() for name in names)),
+            }
         source_runtime = record.get("video_duration")
         fallback_runtime = record.get("runtime_minutes")
         source_valid = type(source_runtime) is int and 1 <= source_runtime <= 999

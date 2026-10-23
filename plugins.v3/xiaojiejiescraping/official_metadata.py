@@ -34,13 +34,34 @@ class OfficialMetadataProvider(_HtmlProvider):
             return None
         rows = tables[0].xpath(".//*[contains(concat(' ', normalize-space(@class), ' '), ' item ')]")
         values = {"品番": [], "監督": [], "収録時間": []}
+        actresses = []
+        actress_rows = 0
+        actress_rows_valid = True
         for row in rows:
             labels = [" ".join(" ".join(node.itertext()).split()) for node in row.xpath("./*[contains(concat(' ', normalize-space(@class), ' '), ' th ')]")]
-            if len(labels) != 1 or labels[0] not in values:
-                continue
             cells = row.xpath("./*[contains(concat(' ', normalize-space(@class), ' '), ' td ')]")
+            if "女優" in labels:
+                actress_rows += 1
+                if len(labels) != 1 or labels[0] != "女優" or len(cells) != 1:
+                    actress_rows_valid = False
+                    continue
+                links = cells[0].xpath(".//a")
+                if not links:
+                    actress_rows_valid = False
+                for link in links:
+                    name = " ".join(" ".join(link.itertext()).split())
+                    href = link.get("href", "")
+                    if (name and len(name) <= 200 and len(href) <= 2048
+                            and re.fullmatch(r"https://attackers\.net/actress/detail/\d+/?", href)):
+                        actresses.append(name)
+                    else:
+                        actress_rows_valid = False
+                continue
+            if len(labels) != 1:
+                continue
             if len(cells) == 1:
-                values[labels[0]].append(" ".join(" ".join(cells[0].itertext()).split()))
+                if labels[0] in values:
+                    values[labels[0]].append(" ".join(" ".join(cells[0].itertext()).split()))
         catalog = values["品番"]
         catalog_tokens = []
         if len(catalog) == 1:
@@ -50,6 +71,11 @@ class OfficialMetadataProvider(_HtmlProvider):
             return None
 
         result = {}
+        if actress_rows == 1 and actress_rows_valid and actresses:
+            result["_actress_evidence"] = {
+                "source": "attackers-official", "number": expected,
+                "names": list(dict.fromkeys(actresses)),
+            }
         directors = {value for value in values["監督"] if value and value not in {"-", "－", "なし"}}
         if len(directors) == 1:
             director = next(iter(directors))

@@ -46,7 +46,7 @@ def handoff(tmp_path, plugin_host_context):
     )
     state.ledger = HandoffLedger(state.ledger_path)
 
-    def recognize(context, meta):
+    def recognize(context, meta, **_kwargs):
         state.recognitions.append((context, meta))
         if state.before_recognize:
             state.before_recognize()
@@ -126,6 +126,23 @@ def test_invalid_or_unapproved_execution_configuration_cannot_enqueue(handoff, c
     assert coordinator.enqueue(handoff.torrent, handoff.source) is None
     assert handoff.calls == [] and handoff.recognitions == []
     assert HandoffConfig().target() is None
+
+
+def test_auto_handoff_refuses_official_multiple_actresses_even_if_only_one_matches_media(handoff):
+    config = replace(handoff.config, actress_subfolder=True)
+    coordinator = HandoffCoordinator(
+        handoff.ledger, config, handoff.recognize, transfer=handoff.transfer,
+        history=handoff.history,
+        actress_evidence=lambda _media, _number: (["Synthetic Actress", "Other Actress"], ["Synthetic Actress"]),
+    )
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    assert record is not None
+
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+
+    assert result[0]["state"] == "failed"
+    assert result[0]["payload"]["reason"] == "primary_actress_choice_required"
+    assert handoff.calls == []
 
 
 def test_target_must_exist_and_not_overlap_source_roots(handoff, tmp_path):

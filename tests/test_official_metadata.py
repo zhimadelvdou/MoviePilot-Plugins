@@ -73,6 +73,51 @@ def test_official_lookup_uses_fixed_path_and_preserves_leading_zeroes(monkeypatc
     assert result["runtime_minutes"] == 120
 
 
+def test_official_supplement_projects_only_a_complete_single_actress_row(monkeypatch):
+    provider = OfficialMetadataProvider()
+    row = ('<div class="item"><div class="th">女優</div><div class="td">'
+           '<a href="https://attackers.net/actress/detail/123">栗山莉緒</a>'
+           '<a href="https://attackers.net/actress/detail/456">美園和花</a>'
+           '</div></div>')
+    monkeypatch.setattr(provider, "_load", lambda _path: (document(PAGE.replace('</div></body>', row + '</div></body>')), provider.base))
+
+    result = provider.supplement("ADN-000765")
+
+    assert result["_actress_evidence"] == {
+        "source": "attackers-official", "number": "ADN000765", "names": ["栗山莉緒", "美園和花"],
+    }
+
+
+def test_official_supplement_rejects_partial_and_duplicate_actress_rows(monkeypatch):
+    provider = OfficialMetadataProvider()
+    partial = ('<div class="item"><div class="th">女優</div><div class="td">'
+               '<a href="https://attackers.net/actress/detail/123">栗山莉緒</a>'
+               '<a>Unknown</a></div></div>')
+    duplicate = ('<div class="item"><div class="th">女優</div><div class="td">'
+                 '<a href="https://attackers.net/actress/detail/123">栗山莉緒</a></div></div>'
+                 '<div class="item"><div class="th">女優</div><div class="td">'
+                 '<a href="https://attackers.net/actress/detail/123">栗山莉緒</a></div></div>')
+    for rows in (partial, duplicate):
+        monkeypatch.setattr(provider, "_load", lambda _path, rows=rows: (
+            document(PAGE.replace('</div></body>', rows + '</div></body>')), provider.base))
+        result = provider.supplement("ADN-000765")
+        assert "_actress_evidence" not in result
+
+
+def test_malformed_actress_label_row_plus_valid_row_does_not_create_unique_evidence(monkeypatch):
+    provider = OfficialMetadataProvider()
+    malformed = ('<div class="item"><div class="th">女優</div><div class="th">監督</div></div>')
+    valid = ('<div class="item"><div class="th">女優</div><div class="td">'
+             '<a href="https://attackers.net/actress/detail/123">栗山莉緒</a></div></div>')
+    rows = malformed + valid
+    monkeypatch.setattr(provider, "_load", lambda _path: (
+        document(PAGE.replace('</div></body>', rows + '</div></body>')), provider.base))
+
+    result = provider.supplement("ADN-000765")
+
+    assert "_actress_evidence" not in result
+
+
 def test_official_detail_redirect_policy_rejects_other_hosts_and_catalog_families():
     provider = OfficialMetadataProvider()
 

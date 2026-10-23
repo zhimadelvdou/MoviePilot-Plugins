@@ -21,6 +21,7 @@ class AutomaticStatus(BaseModel):
     target_path: str = ""
     last_poll_at: float | None = None
     counts: dict[str, int]
+    pending_actress_choices: list[dict[str, str]] = []
     error: str | None = None
 
 

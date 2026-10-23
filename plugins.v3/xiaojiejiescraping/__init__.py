@@ -40,7 +40,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.2"
+    plugin_version = "0.8.3"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"

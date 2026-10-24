@@ -427,24 +427,26 @@ class ManualTransferWorkspace:
             actress_identity = None
             candidates = []
             if actress_subfolder:
-                official_names, allowed_official = self.plugin.actress_evidence(media, number)
+                trusted_names, allowed_trusted = self.plugin.actress_evidence(media, number)
                 names_in_media = actor_names(media)
-                candidates = allowed_official if official_names is not None else names_in_media
+                candidates = allowed_trusted if trusted_names is not None else names_in_media
                 requested_actress = request.actress_choices.get(str(path))
                 if requested_actress is not None and requested_actress in candidates:
                     selected_actress = requested_actress
                     actress_choice_mode = "manual"
-                elif (official_names is not None and len(official_names) == 1
-                      and allowed_official == official_names):
-                    selected_actress = official_names[0]
-                    actress_choice_mode = "official_unique"
+                elif (trusted_names is not None and len(trusted_names) == 1
+                      and allowed_trusted == trusted_names):
+                    selected_actress = trusted_names[0]
+                    actress_choice_mode = "source_flag_unique"
                 if selected_actress is None:
+                    message = ("本次来源识别没有 avdbs_actor=true 的可信女主演标记；等待可信标记后重试"
+                               if trusted_names == [] else "请从本片可信女主演候选中选择后重新预览")
                     items.append(ManualPreviewItem(
                         source=str(path), title=self._value(media, "title"),
                         media_source=request.media_source, media_id=str(media.media_id),
                         poster_path=self._value(media, "poster_path"), success=False,
-                        message="请从本片演员候选中选择女主演后重新预览",
-                        actor_candidates=candidates, needs_actress_choice=True))
+                        message=message, actor_candidates=candidates,
+                        needs_actress_choice=bool(candidates)))
                     continue
                 selected_actress = safe_component(selected_actress)
                 child = child_directory(target, selected_actress) if selected_actress else None
@@ -628,13 +630,13 @@ class ManualTransferWorkspace:
                         break
                     effective_target = Path(intent.get("actress_root") or target)
                     if intent.get("actress_subfolder"):
-                        official_names, allowed = self.plugin.actress_evidence(media, intent["number"])
-                        if intent.get("actress_choice_mode") == "official_unique":
-                            valid_name = (official_names is not None and len(official_names) == 1
-                                          and allowed == official_names
-                                          and official_names[0] == intent.get("actress_name"))
+                        trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
+                        if intent.get("actress_choice_mode") == "source_flag_unique":
+                            valid_name = (trusted_names is not None and len(trusted_names) == 1
+                                          and allowed == trusted_names
+                                          and trusted_names[0] == intent.get("actress_name"))
                         else:
-                            candidates_now = allowed if official_names is not None else actor_names(media)
+                            candidates_now = allowed if trusted_names is not None else actor_names(media)
                             valid_name = intent.get("actress_name") in candidates_now
                         if (not valid_name or not child_directory_matches(
                                 target, intent["actress_name"], intent.get("actress_directory_identity"))
@@ -706,13 +708,13 @@ class ManualTransferWorkspace:
                     raise RuntimeError("提交时原生身份回查不一致")
                 effective_target = Path(intent.get("actress_root") or target)
                 if intent.get("actress_subfolder"):
-                    official_names, allowed = self.plugin.actress_evidence(media, intent["number"])
-                    if intent.get("actress_choice_mode") == "official_unique":
-                        valid_name = (official_names is not None and len(official_names) == 1
-                                      and allowed == official_names
-                                      and official_names[0] == intent.get("actress_name"))
+                    trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
+                    if intent.get("actress_choice_mode") == "source_flag_unique":
+                        valid_name = (trusted_names is not None and len(trusted_names) == 1
+                                      and allowed == trusted_names
+                                      and trusted_names[0] == intent.get("actress_name"))
                     else:
-                        candidates_now = allowed if official_names is not None else actor_names(media)
+                        candidates_now = allowed if trusted_names is not None else actor_names(media)
                         valid_name = intent.get("actress_name") in candidates_now
                     if (not valid_name or not child_directory_matches(
                             target, intent["actress_name"], intent.get("actress_directory_identity"))):

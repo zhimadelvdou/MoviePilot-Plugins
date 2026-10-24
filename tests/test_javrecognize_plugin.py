@@ -99,6 +99,71 @@ def test_explicit_manual_source_can_query_without_configured_paths(plugin, sampl
     assert fake.calls == [("async_search" if asynchronous else "search", "TEST-123"), ("async_fetch" if asynchronous else "fetch", "fixture_native_123")]
 
 
+@pytest.mark.parametrize(("flag", "expected"), [
+    (True, ["Trusted Actress"]), (1, []), ("true", []), (False, []), (None, []), ("missing", []),
+])
+def test_actress_candidates_require_true_flag_from_this_raw_packet(plugin, sample_payload, flag, expected):
+    packet = deepcopy(sample_payload)
+    candidate = {"name": "Trusted Actress"}
+    if flag != "missing":
+        candidate["avdbs_actor"] = flag
+    packet["actors"] = [candidate, {"name": "Unmarked Actor", "avdbs_actor": False}]
+    plugin._provider = FakeProvider(packet)
+
+    media = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=True)
+
+    assert plugin.actress_evidence(media, "TEST-123") == (expected, expected)
+    cached_media = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=True)
+    assert plugin.actress_evidence(cached_media, "TEST-123") == (expected, expected)
+    assert [actor["name"] for actor in media.actors] == ["Trusted Actress", "Unmarked Actor"]
+    assert "_xiaojiejie_actress_flag_evidence" not in media.to_dict()
+    nfo = ET.fromstring(plugin.metadata_nfo(mediainfo=media))
+    assert [actor.findtext("name") for actor in nfo.findall("actor")] == ["Trusted Actress", "Unmarked Actor"]
+
+
+def test_current_unmarked_packet_does_not_reuse_stale_actress_cache(plugin, sample_payload):
+    packet = deepcopy(sample_payload)
+    packet["actors"] = [{"name": "Trusted Actress", "avdbs_actor": True}]
+    provider = FakeProvider(packet)
+    plugin._provider = provider
+    first = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=True)
+    assert plugin.actress_evidence(first, "TEST-123") == (["Trusted Actress"], ["Trusted Actress"])
+
+    packet["actors"] = [{"name": "Trusted Actress", "avdbs_actor": False}]
+    fresh = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=False)
+
+    assert plugin.actress_evidence(fresh, "TEST-123") == ([], [])
+    assert len(provider.calls) == 2
+
+
+def test_duplicate_flagged_names_form_one_candidate(plugin, sample_payload):
+    packet = deepcopy(sample_payload)
+    packet["actors"] = [
+        {"name": "Trusted Actress", "avdbs_actor": True},
+        {"name": "Trusted Actress", "avdbs_actor": True},
+        {"name": "Unmarked Actor", "avdbs_actor": False},
+    ]
+    plugin._provider = FakeProvider(packet)
+
+    media = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=False)
+
+    assert plugin.actress_evidence(media, "TEST-123") == (["Trusted Actress"], ["Trusted Actress"])
+
+
+def test_source_flag_evidence_is_bound_to_number_identity_and_projected_cast(plugin, sample_payload):
+    packet = deepcopy(sample_payload)
+    packet["actors"] = [{"name": "Trusted Actress", "avdbs_actor": True}]
+    plugin._provider = FakeProvider(packet)
+    media = plugin.recognize_media(meta("TEST-123"), media_source="manko", cache=False)
+
+    assert plugin.actress_evidence(media, "TEST-124") == ([], [])
+    media.media_id = "different-native-id"
+    assert plugin.actress_evidence(media, "TEST-123") == ([], [])
+    media.media_id = "fixture_native_123"
+    media.actors = []
+    assert plugin.actress_evidence(media, "TEST-123") == (["Trusted Actress"], [])
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("sources", [None, MediaSource.TMDB, (MediaSource.Douban, MediaSource.TMDB), "otherplugin"])
 def test_native_search_ignores_unselected_source(plugin, sources, asynchronous):

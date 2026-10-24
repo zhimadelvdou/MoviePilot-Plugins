@@ -397,10 +397,10 @@ def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(
     assert set(image_client.urls) == set(NATIVE_IMAGES)
 
 
-def test_actress_folder_preview_without_official_choice_stops_before_native_transfer(
+def test_actress_folder_preview_without_source_flag_waits_for_trusted_marker(
     offline_plugin, tmp_path, sample_payload,
 ):
-    """缺少官方唯一女優证据时，展示演员候选并先等人工选择。"""
+    """没有原始 true 标记时不把普通 cast 提供为女主演候选。"""
     from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
 
     source = tmp_path / "downloads" / "TEST-123.mkv"
@@ -430,14 +430,15 @@ def test_actress_folder_preview_without_official_choice_stops_before_native_tran
     assert calls == []
     assert preview.summary.success == 0
     item = preview.items[0]
-    assert item.needs_actress_choice is True
-    assert item.actor_candidates == ["Synthetic <Actor> & Name"]
+    assert item.needs_actress_choice is False
+    assert item.actor_candidates == []
+    assert "avdbs_actor=true" in item.message
 
 
-def test_official_multiple_names_only_one_matching_actor_still_requires_manual_choice(
+def test_only_true_flagged_actors_are_candidates_and_false_actor_cannot_be_chosen(
     offline_plugin, tmp_path, monkeypatch,
 ):
-    """官方女優行有多人时，即便当前媒体只列一人也不能推断唯一主演。"""
+    """多个 true 标记只提供这些候选，false actor 和旧官方名单不能扩大候选范围。"""
     from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
 
     source = tmp_path / "downloads" / "ADN-000775.mkv"
@@ -448,9 +449,11 @@ def test_official_multiple_names_only_one_matching_actor_still_requires_manual_c
     packet = {
         "number": "ADN-000775",
         "record": {"_id": "fixture_native_123", "number": "ADN-000775", "title": "Synthetic Work"},
-        "actors": [{"name": "Synthetic Actress"}],
+        "actors": [{"name": "Synthetic Actress", "avdbs_actor": True},
+                   {"name": "Other Trusted Actress", "avdbs_actor": True},
+                   {"name": "Unmarked Actor", "avdbs_actor": False}],
         "_actress_evidence": {"source": "attackers-official", "number": "ADN000775",
-                              "names": ["Synthetic Actress", "Other Official Actress"]},
+                              "names": ["Unmarked Actor"]},
     }
 
     class ActressProvider:
@@ -465,20 +468,36 @@ def test_official_multiple_names_only_one_matching_actor_still_requires_manual_c
         "transfer_type": "link", "handoff_mode": "discover"})
     offline_plugin._provider = ActressProvider()
     calls = []
-    offline_plugin._manual.transfer = lambda **kwargs: calls.append(kwargs)
+
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        destination = Path(kwargs["target_path"]) / source.name
+        return True, {"items": [{"success": True, "source": str(source), "source_storage": "local",
+                                  "target": str(destination)}]}
+
+    offline_plugin._manual.transfer = transfer
     preview = offline_plugin._manual.preview(ManualPreviewRequest(
-        path=str(source), target_path=str(library), media_source="manko", actress_subfolder=True))
+        path=str(source), target_path=str(library), media_source="manko", actress_subfolder=True,
+        actress_choices={str(source): "Unmarked Actor"}))
 
     assert calls == []
     assert preview.summary.success == 0
     assert preview.items[0].needs_actress_choice is True
-    assert preview.items[0].actor_candidates == ["Synthetic Actress"]
+    assert preview.items[0].actor_candidates == ["Synthetic Actress", "Other Trusted Actress"]
+    assert "女主演候选" in preview.items[0].message
+
+    selected = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="manko", actress_subfolder=True,
+        actress_choices={str(source): "Other Trusted Actress"}))
+    assert selected.summary.success == 1
+    assert selected.items[0].selected_actress == "Other Trusted Actress"
+    assert calls[0]["target_path"] == library / "Other Trusted Actress"
 
 
-def test_manual_preview_auto_actress_choice_is_invalidated_if_official_evidence_gains_a_second_name(
+def test_manual_preview_is_invalidated_when_selected_source_flag_is_removed(
     offline_plugin, tmp_path,
 ):
-    """预览时唯一官方女主演在 execute 前变成多人，必须停止且不调用原生整理。"""
+    """预览时被选演员失去 true 标记，必须停止且不调用原生整理。"""
     from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
 
     source = tmp_path / "downloads" / "ADN-000775.mkv"
@@ -489,9 +508,7 @@ def test_manual_preview_auto_actress_choice_is_invalidated_if_official_evidence_
     packet = {
         "number": "ADN-000775",
         "record": {"_id": "fixture_native_123", "number": "ADN-000775", "title": "Synthetic Work"},
-        "actors": [{"name": "Synthetic Actress"}],
-        "_actress_evidence": {"source": "attackers-official", "number": "ADN000775",
-                              "names": ["Synthetic Actress"]},
+        "actors": [{"name": "Synthetic Actress", "avdbs_actor": True}],
     }
 
     class ActressProvider:
@@ -521,8 +538,7 @@ def test_manual_preview_auto_actress_choice_is_invalidated_if_official_evidence_
     assert preview.summary.success == 1, preview
     assert preview.items[0].selected_actress == "Synthetic Actress"
 
-    packet["actors"].append({"name": "Other Official Actress"})
-    packet["_actress_evidence"]["names"].append("Other Official Actress")
+    packet["actors"][0]["avdbs_actor"] = False
     execution = offline_plugin._manual.execute(preview.preview_id)
 
     assert execution.state == "failed", execution
@@ -560,10 +576,8 @@ def test_native_manual_actress_subfolder_preview_execute_and_scrapes(
         "backdrop_images": ["https://art.example.test/backdrop.jpg"],
         "cover_image": "https://images.example.test/poster.jpg",
     })
-    packet["actors"] = [{"name": actress}]
-    packet["_actress_evidence"] = {
-        "source": "attackers-official", "number": "ADN000775", "names": [actress],
-    }
+    packet["actors"] = [{"name": actress, "avdbs_actor": True},
+                        {"name": "Unmarked Cast Member", "avdbs_actor": False}]
 
     class ActressProvider:
         def search(self, found_number):
@@ -633,7 +647,9 @@ def test_native_manual_actress_subfolder_preview_execute_and_scrapes(
     assert nfo.findtext("director") == "Synthetic Director"
     assert nfo.findtext("studio") == "Synthetic Studio"
     assert nfo.findtext("runtime") == "98"
-    assert [actor.findtext("name") for actor in nfo.findall("actor")] == [actress]
+    assert [actor.findtext("name") for actor in nfo.findall("actor")] == [
+        actress, "Unmarked Cast Member",
+    ]
     images = {path.name: path.read_bytes() for path in expected_target.parent.glob("*.jpg")}
     assert images["poster.jpg"] == NATIVE_IMAGES["https://images.example.test/poster.jpg"]
     background = "backdrop.jpg" if "backdrop.jpg" in images else "fanart.jpg"

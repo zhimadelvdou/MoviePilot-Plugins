@@ -128,7 +128,7 @@ def test_invalid_or_unapproved_execution_configuration_cannot_enqueue(handoff, c
     assert HandoffConfig().target() is None
 
 
-def test_auto_handoff_refuses_official_multiple_actresses_even_if_only_one_matches_media(handoff):
+def test_auto_handoff_refuses_multiple_trusted_actress_candidates_even_if_one_matches_media(handoff):
     config = replace(handoff.config, actress_subfolder=True)
     coordinator = HandoffCoordinator(
         handoff.ledger, config, handoff.recognize, transfer=handoff.transfer,
@@ -143,6 +143,51 @@ def test_auto_handoff_refuses_official_multiple_actresses_even_if_only_one_match
     assert result[0]["state"] == "failed"
     assert result[0]["payload"]["reason"] == "primary_actress_choice_required"
     assert handoff.calls == []
+
+
+def test_auto_handoff_uses_flagged_names_from_fresh_recognition(handoff, tmp_path, monkeypatch, sample_payload):
+    from app.plugins.xiaojiejiescraping import XiaojiejieScraping
+    from app.plugins.xiaojiejiescraping.scope import RecognitionContext
+    monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
+    plugin = XiaojiejieScraping()
+    plugin.init_plugin({"enabled": True, "sources": ["manko"], "recognize_dirs": [str(handoff.inputs)]})
+    packet = deepcopy(sample_payload)
+    packet["actors"] = [
+        {"name": "Trusted Actress", "avdbs_actor": True},
+        {"name": "Unmarked Cast Member", "avdbs_actor": False},
+    ]
+
+    class Provider:
+        def search(self, _number):
+            return deepcopy(packet)
+
+        def fetch(self, _identity):
+            return deepcopy(packet)
+
+    plugin._provider = Provider()
+    context = RecognitionContext("transfer", "local", str(handoff.source), (str(handoff.inputs),))
+    recognize = lambda request_context, meta, **kwargs: plugin.recognize_scoped(
+        request_context, meta, **kwargs)
+    config = replace(handoff.config, mode="preview", actress_subfolder=True)
+    calls = []
+
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        target = Path(kwargs["target_path"]) / handoff.source.name
+        return True, {"items": [{"source": str(handoff.source), "source_storage": "local",
+                                  "target": str(target), "success": True}]}
+
+    coordinator = HandoffCoordinator(handoff.ledger, config, recognize, transfer=transfer,
+                                     history=handoff.history, actress_evidence=plugin.actress_evidence)
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    assert record is not None
+
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+
+    assert result[0]["state"] == "previewed"
+    assert calls[0]["target_path"] == handoff.output / "Trusted Actress"
+    assert calls[0]["mediainfo"].actors[1]["name"] == "Unmarked Cast Member"
+    plugin.stop_service()
 
 
 def test_target_must_exist_and_not_overlap_source_roots(handoff, tmp_path):

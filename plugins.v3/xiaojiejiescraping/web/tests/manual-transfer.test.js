@@ -80,6 +80,7 @@ describe('manual transfer page', () => {
     const choicePreview = {
       preview_id: null, expires_at: null,
       items: [{ source: '/downloads/ADN-000775.mkv', title: '影片', success: false,
+        message: '请从本片可信女主演候选中选择后重新预览',
         needs_actress_choice: true, actor_candidates: ['女優甲', '女優乙'] }],
       summary: { total: 1, success: 0, failed: 1 },
     }
@@ -93,13 +94,32 @@ describe('manual transfer page', () => {
     await setSwitch(wrapper, 'actress-subfolder', true)
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('请从本片演员候选中选择后重新预览')
+    expect(wrapper.text()).toContain('请从本片可信女主演候选中选择后重新预览')
     await selectValue(wrapper, 'actress-choice-0', '女優乙')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
     expect(api.post).toHaveBeenLastCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({
       actress_subfolder: true, actress_choices: { '/downloads/ADN-000775.mkv': '女優乙' },
     }))
+  })
+
+  it('explains strict source flags and waits without offering ordinary cast when none are trusted', async () => {
+    const { api, wrapper } = setup()
+    api.post.mockImplementation(async url => url.endsWith('/preview') ? {
+      items: [{ source: '/downloads/ADN-000775.mkv', success: false,
+        message: '本次来源识别没有 avdbs_actor=true 的可信女主演标记；等待可信标记后重试',
+        needs_actress_choice: false, actor_candidates: [] }],
+      summary: { total: 1, success: 0, failed: 1 },
+    } : ({ state: 'completed', items: [], summary: {} }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('avdbs_actor=true')
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await setSwitch(wrapper, 'actress-subfolder', true)
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('等待可信标记后重试')
+    expect(wrapper.findAll('[data-testid^="actress-choice-"]')).toHaveLength(0)
   })
 
   it('keeps other file choices visible and sends per-file selections together', async () => {

@@ -9,11 +9,12 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 import threading
+import weakref
 from app.sdk.plugin.base import _PluginBase
 from app.sdk.media import MediaInfo
 from app.sdk.services import DownloaderHelper
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
-from .core import (SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, project_record,
+from .core import (SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, normalize_number, project_record,
                    project_actress_evidence, record_numbers, render_nfo)
 from .artwork import backdrop_candidates, is_usable_landscape
 from .provider import MankoProvider
@@ -42,7 +43,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.6"
+    plugin_version = "0.8.7"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -63,6 +64,7 @@ class XiaojiejieScraping(_PluginBase):
         self._providers = {}
         self._active_sources = (SOURCE,)
         self._cache = None
+        self._actress_evidence = {}
         self._discovery = False
         self._downloader = ""
         self._tag = ""
@@ -88,6 +90,7 @@ class XiaojiejieScraping(_PluginBase):
         config = config or {}
         with self._lock:
             self._generation += 1
+            self._actress_evidence.clear()
             self._enabled = config.get("enabled") is True
             self._storage = str(config.get("storage") or "local")
             self._discovery = config.get("discovery_enabled") is True
@@ -173,6 +176,7 @@ class XiaojiejieScraping(_PluginBase):
             self._cache = None
             self._journal = None
             self._actor_index = None
+            self._actress_evidence.clear()
             self._handoff = None
             self._manual = None
             # Reload teardown revokes memory only; persistent new-task boundary is preserved.
@@ -681,6 +685,20 @@ class XiaojiejieScraping(_PluginBase):
                     cache.put(source + ":id:" + str(record["_id"]), cached)
             result = MediaInfo()
             result.from_dict(projected)
+            if source == SOURCE:
+                flagged_names = []
+                for actor in packet.get("actors", []) if isinstance(packet.get("actors"), list) else []:
+                    if not isinstance(actor, dict) or actor.get("avdbs_actor") is not True:
+                        continue
+                    name = actor.get("name")
+                    safe_name = safe_component(name) if isinstance(name, str) else None
+                    if safe_name == name and safe_name not in flagged_names:
+                        flagged_names.append(safe_name)
+                evidence = {
+                    "source": source, "media_id": str(record["_id"]),
+                    "number": actual_number, "names": flagged_names,
+                }
+                self._remember_actress_evidence(result, evidence, generation)
             diagnose(source, "accept", "accepted")
             return result
         except (OSError, TypeError, ValueError, KeyError, AttributeError):
@@ -688,31 +706,53 @@ class XiaojiejieScraping(_PluginBase):
             return None
 
     def actress_evidence(self, media, number: str | None = None) -> tuple[list[str] | None, list[str]]:
-        """Return official names only from a validated plugin packet; intersect actors exactly."""
+        """Return current Manko packet actors explicitly marked as actresses."""
         from .layout import actor_names
         source = str(getattr(getattr(media, "media_source", None), "value", getattr(media, "media_source", "")))
         identity = str(getattr(media, "media_id", "") or "")
-        if source != SOURCE or not IDENTIFIER.fullmatch(identity) or not self._cache:
+        if source != SOURCE:
             return None, actor_names(media)
+        with self._lock:
+            entry = self._actress_evidence.get(id(media))
+            evidence = (entry[2] if entry is not None and entry[0]() is media
+                        and entry[1] == self._generation else None)
         try:
-            cached = self._cache.get(source + ":id:" + identity)
-            packet = cached.get("packet") if isinstance(cached, dict) else None
-            evidence = cached.get("actress_evidence") if isinstance(cached, dict) else None
-            packet_number = packet.get("number") if isinstance(packet, dict) else None
-            expected = ("ADN" + str(number).upper().removeprefix("ADN-") if number is not None
-                        else "ADN" + str(packet_number or "").upper().removeprefix("ADN-"))
-            if (not isinstance(evidence, dict) or evidence.get("source") != "attackers-official"
-                    or evidence.get("number") != expected or not isinstance(evidence.get("names"), list)):
-                return None, actor_names(media)
+            expected = normalize_number(number) if number is not None else None
+            if (not IDENTIFIER.fullmatch(identity) or not isinstance(evidence, dict)
+                    or evidence.get("source") != source or evidence.get("media_id") != identity
+                    or not isinstance(evidence.get("number"), str)
+                    or (number is not None and (expected is None or evidence.get("number") != expected))
+                    or not isinstance(evidence.get("names"), list)):
+                return [], []
             names = [value for value in evidence["names"] if isinstance(value, str)
                      and safe_component(value) == value]
-            if not names:
-                return None, actor_names(media)
             actors = actor_names(media)
             allowed = [name for name in names if name in actors]
             return list(dict.fromkeys(names)), allowed
         except Exception:
-            return None, actor_names(media)
+            return [], []
+
+    def _remember_actress_evidence(self, media, evidence: dict, generation: int) -> None:
+        """Keep source flags outside MediaInfo serialization and bound to object identity."""
+        key = id(media)
+        plugin_ref = weakref.ref(self)
+
+        def discard(reference):
+            plugin = plugin_ref()
+            if plugin is None:
+                return
+            with plugin._lock:
+                current = plugin._actress_evidence.get(key)
+                if current is not None and current[0] is reference:
+                    plugin._actress_evidence.pop(key, None)
+
+        try:
+            reference = weakref.ref(media, discard)
+        except TypeError:
+            return
+        with self._lock:
+            if self._enabled and self._generation == generation:
+                self._actress_evidence[key] = (reference, generation, evidence)
 
     def recognize_scoped(self, context: RecognitionContext, meta=None, mtype=None, media_source=None, media_id=None, episode_group=None, cache=True) -> MediaInfo | None:
         """供插件筛选 qBittorrent 文件后调用；自动流程的 ID 回查也须在范围内。"""

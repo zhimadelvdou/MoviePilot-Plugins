@@ -43,7 +43,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.7"
+    plugin_version = "0.8.8"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -654,7 +654,9 @@ class XiaojiejieScraping(_PluginBase):
             if not number:
                 diagnose(source, "search", "number_not_unique")
                 return None
-            return self._generation, provider, self._cache, source + ":number:" + number, None, number, source
+            cache_key = (source + ":number:complete-first-v1:" + number
+                         if source == SOURCE else source + ":number:" + number)
+            return self._generation, provider, self._cache, cache_key, None, number, source
 
     def _accept(self, request, packet: dict | None, persist: bool = True) -> MediaInfo | None:
         if not packet:

@@ -274,14 +274,30 @@ def test_cache_hits_do_not_extend_metadata_expiration(plugin, scope_context, mon
 
     monkeypatch.setattr(core.time, "time", lambda: 1000)
     assert plugin.recognize_scoped(scope_context, meta()) is not None
-    expires = plugin._cache._data["manko:number:TEST-123"]["expires"]
+    key = "manko:number:complete-first-v1:TEST-123"
+    expires = plugin._cache._data[key]["expires"]
     monkeypatch.setattr(core.time, "time", lambda: 1010)
     assert plugin.recognize_scoped(scope_context, meta()) is not None
-    assert plugin._cache._data["manko:number:TEST-123"]["expires"] == expires
+    assert plugin._cache._data[key]["expires"] == expires
     assert len(plugin._provider.calls) == 1
     monkeypatch.setattr(core.time, "time", lambda: expires)
     assert plugin.recognize_scoped(scope_context, meta()) is not None
     assert len(plugin._provider.calls) == 2
+
+
+def test_manko_number_search_ignores_legacy_selection_cache_key(plugin, scope_context, sample_payload):
+    legacy_key = "manko:number:TEST-123"
+    plugin._cache.put(legacy_key, {
+        "packet": {**deepcopy(sample_payload), "record": {**sample_payload["record"], "title": "stale old selection"}},
+        "projected": {"title": "stale old selection"},
+    })
+
+    result = plugin.recognize_scoped(scope_context, meta())
+
+    assert result is not None and result.title != "stale old selection"
+    assert len(plugin._provider.calls) == 1
+    assert plugin._cache.get(legacy_key)["projected"]["title"] == "stale old selection"
+    assert plugin._cache.get("manko:number:complete-first-v1:TEST-123") is not None
 
 
 @pytest.mark.parametrize("change", ["stop", "reload"])
@@ -509,7 +525,9 @@ def test_same_native_id_and_number_are_isolated_between_sources(multisource_plug
     for source in ("manko", "testsource"):
         cached = plugin.recognize_media(media_source=source, media_id="fixture_native_123")
         assert cached.title == results[source].title
-        assert plugin._cache.get(source + ":number:TEST-123")["projected"]["media_source"] == source
+        number_key = ("manko:number:complete-first-v1:TEST-123" if source == "manko"
+                      else source + ":number:TEST-123")
+        assert plugin._cache.get(number_key)["projected"]["media_source"] == source
         assert plugin._cache.get(source + ":id:fixture_native_123")["projected"]["media_source"] == source
         document = ET.fromstring(plugin.metadata_nfo(meta(), cached))
         assert document.find("uniqueid").get("type") == source
@@ -545,7 +563,7 @@ def test_scoped_automatic_recognition_uses_ordered_exact_fallback(multisource_pl
     assert len(plugin._provider.calls) == 1
     assert len(plugin._providers["testsource"].calls) == (0 if first_result == "success" else 1)
     if first_result != "success":
-        assert plugin._cache.get("manko:number:TEST-123") is None
+        assert plugin._cache.get("manko:number:complete-first-v1:TEST-123") is None
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -567,7 +585,7 @@ def test_wrong_claimed_source_cannot_populate_requested_source_cache(multisource
     result = asyncio.run(plugin.async_recognize_media(**arguments)) if asynchronous else plugin.recognize_media(**arguments)
     assert result is None
     assert plugin._cache.get("testsource:number:TEST-123") is None
-    assert plugin._cache.get("manko:number:TEST-123") is None
+    assert plugin._cache.get("manko:number:complete-first-v1:TEST-123") is None
     assert plugin._provider.calls == []
 
 

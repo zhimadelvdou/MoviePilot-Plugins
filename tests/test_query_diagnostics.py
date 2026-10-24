@@ -110,7 +110,7 @@ def test_search_failure_reasons(messages, replay, asynchronous, payload, reason)
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("case,reason", [
-    ("no_match", "no_exact_match"), ("ambiguous", "ambiguous_match"),
+    ("no_match", "no_exact_match"), ("ambiguous", "metadata_incomplete"),
     ("wrong_identity", "identity_mismatch"), ("detail_schema", "schema_invalid"),
 ])
 def test_detail_and_match_reasons(messages, replay, sample_payload, asynchronous, case, reason):
@@ -127,7 +127,14 @@ def test_detail_and_match_reasons(messages, replay, sample_payload, asynchronous
         replay.payloads["/detail/fixture_native_123"] = {"data": []}
     assert search(asynchronous) is None
     assert has_reason(messages, reason)
-    assert not any(path.startswith("/actors/") for path in replay.calls)
+    if case == "ambiguous":
+        assert [path for path in replay.calls if path.startswith("/actors/")] == [
+            "/actors/fixture_native_123", "/actors/second",
+        ]
+        assert has_reason(messages, "metadata_incomplete")
+        assert not has_reason(messages, "ambiguous_match")
+    else:
+        assert not any(path.startswith("/actors/") for path in replay.calls)
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -199,6 +206,14 @@ def test_allowlist_redacts_every_field(messages, source, operation, reason, stat
     assert "http_status=" not in messages[0] and "count=" not in messages[0]
 
 
+def test_missing_field_diagnostic_uses_fixed_allowlist(messages):
+    diagnostics.diagnose("manko", "search", "metadata_incomplete",
+                         fields=["date", PRIVATE, "actor_name", "title", 123])
+    assert len(messages) == 1
+    assert "missing=title,date" in messages[0]
+    assert PRIVATE not in messages[0] and "actor_name" not in messages[0]
+
+
 @pytest.fixture
 def plugin(monkeypatch, tmp_path, plugin_host_context):
     monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _: tmp_path)
@@ -209,7 +224,8 @@ def plugin(monkeypatch, tmp_path, plugin_host_context):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_manual_manko_search_returns_each_exact_ambiguous_native_id(messages, replay, plugin, asynchronous):
+def test_manual_manko_search_rejects_incomplete_multi_id_but_keeps_exact_id_fetch(
+        messages, replay, plugin, asynchronous):
     first_id = "69a07400131836087e481b7a"
     second_id = "69a3697d1b1225b605c52f5f"
     first = {
@@ -234,11 +250,16 @@ def test_manual_manko_search_returns_each_exact_ambiguous_native_id(messages, re
     arguments = {"meta": SimpleNamespace(org_string="ADN-765 synthetic.mkv", type=None), "media_source": "manko"}
     results = asyncio.run(plugin.async_search_medias(**arguments)) if asynchronous else plugin.search_medias(**arguments)
 
-    assert [(item.media_source.value, item.media_id) for item in results] == [
-        ("manko", first_id), ("manko", second_id),
+    number_key = "manko:number:complete-first-v1:ADN-765"
+    legacy_number_key = "manko:number:ADN-765"
+    assert results == []
+    assert has_reason(messages, "metadata_incomplete")
+    assert not has_reason(messages, "ambiguous_match")
+    assert [path for path in replay.calls if path.startswith("/actors/")] == [
+        f"/actors/{first_id}", f"/actors/{second_id}",
     ]
-    number_key = "manko:number:ADN-765"
     assert plugin._cache.get(number_key) is None
+    assert plugin._cache.get(legacy_number_key) is None
 
     def recognize(**kwargs):
         return asyncio.run(plugin.async_recognize_media(**kwargs)) if asynchronous else plugin.recognize_media(**kwargs)
@@ -247,8 +268,10 @@ def test_manual_manko_search_returns_each_exact_ambiguous_native_id(messages, re
         selected = recognize(media_source="manko", media_id=identity)
         assert selected.media_source.value == "manko" and selected.media_id == identity
         assert plugin._cache.get(number_key) is None
+        assert plugin._cache.get(legacy_number_key) is None
     assert recognize(meta=arguments["meta"], media_source="manko", cache=True) is None
     assert plugin._cache.get(number_key) is None
+    assert plugin._cache.get(legacy_number_key) is None
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

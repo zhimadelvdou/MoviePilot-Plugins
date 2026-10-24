@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.7 将女主演候选改为本次 Manko 原始识别演员中 `avdbs_actor` 严格为布尔 `true` 的姓名，并要求与当前识别演员精确对应；唯一候选自动使用，多位只能在这些候选中人工选择，无可信标记时等待数据补齐。所有 cast 仍保留在 NFO。0.8.7 官方 MoviePilot V3 SDK 定向测试通过 `372 passed, 7 subtests`，前端测试 `44/44`、production build 通过；首个 SDK 候选的 6 个失败均来自序列化泄漏断言，改为插件内弱引用映射后通过。新版页面已加载现场验证：ABF-382 未手选演员，按文件名识别得到 1 项成功、0 项失败，预览目标为 `/media/Link/电影/鈴村愛裏/ABF-382 (2026)/ABF-382(2026).mp4`，仅预览、未执行。ADN-765 本次预览在来源身份阶段因两个候选均命中而保持歧义，未到女主演候选筛选，不构成该规则的通过或失败，也未放宽既有身份判定。部署审计确认核心/公开插件数、配置与绑定修订、三份媒体及源保持，自动整理关闭且队列为 0；预览造成的 ledger/cache 变化属于预期。现场证据见[ABF-382 页面记录](../outputs/manko-source-actress-flag-20261024/ui-abf382-auto.txt)、[ADN-765 身份歧义记录](../outputs/manko-source-actress-flag-20261024/ui-adn765-identity-ambiguous.txt)和[部署预览审计](../outputs/manko-source-actress-flag-20261024/final-preview-audit.jsonl)。目前已有三部媒体完成硬链接整理（ADN-765、ADN-775、ABF-382）。ADN阶段两部的整理/刮削记录见[ADN-765专题记录](../records/manko-metadata-artwork-fix-2026-10-22.md)和[ADN-775翻译去重记录](../records/manko-translation-dedup-fix-2026-10-23.md)；ABF-382在0.8.6阶段Chrome整理成功、源目标同inode，但NFO导演和片商为空，整体元数据审计未通过，见[ABF-382 Chrome专题记录](../records/manko-chrome-abf382-2026-10-24.md)。本次0.8.7现场仅预览ABF-382，未重新整理。其它来源和真实 qBittorrent 新下载自动整理仍未验收。默认禁用，自动模式默认只读发现。
+这是开发版本。0.8.8 同番号多原生 ID 查询按 API 返回顺序选取首个完整刮削数据包；不跨 ID 合并标题、简介、图像或演员。若没有完整候选，自动识别拒绝并记录缺少的固定字段标签。正式 MoviePilot V3 SDK 定向回归为 `503 passed, 7 subtests`；0.8.8 已部署生产，73 runtime 文件核验通过，部署清单中 core 有 6 个文件、public 有 1167 个文件；配置与 binding revision 9、3 个下载源及对应媒体、3 份 ledger 和两份 metadata 缓存均保持，自动整理 off、unarmed、queue 0。现场 `GET /media/search` 仅查询 Manko，ADN-765 与 ADN-775 各返回 1 个结果；title、overview、poster、background、日期和 runtime 均完整。搜索前后 ledger/cache/config/media 不变，最终部署审计与备份基线一致。无前端改动，未新增前端测试或 build；本次未做 Chrome 新 UI 验收、preview、transfer 或 scrape。现场证据见[GET smoke](../outputs/manko-scrape-data-selection-20261024/live-search-smoke.log)和[最终审计](../outputs/manko-scrape-data-selection-20261024/final-audit.jsonl)。默认禁用，自动模式默认只读发现。
 
 ## 功能与边界
 
@@ -14,13 +14,13 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 - 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
 - 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
 
-除 Manko 两个现场样本的搜索、刮削与整理验证外，其他来源目前仅有**离线适配验证**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；真实歧义不自动选择，Manko 严格等价多 ID 的处理见下文。
+除 Manko 两个现场样本的搜索、刮削与整理验证外，其他来源目前仅有**离线适配验证**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；Manko 同番号多 ID 时只接受首个完整数据包，不拼接不同 ID 的字段。
 
 ## 来源状态
 
 | 来源 | 已实现合同与限制 |
 | --- | --- |
-| Manko | 原公开 API/base91 合同；详情须逐条证明精确番号并要求完整搜索总数；自动识别接受唯一 ID，或元数据严格等价的多个 ID（稳定选择最小 ID）；仅对 ADN 编号从 ATTACKERS 官方详情补缺失的导演、片商和时长 |
+| Manko | 原公开 API/base91 合同；详情须逐条证明精确番号并要求完整搜索总数；同番号多 ID 按 API 顺序选首个完整数据包，否则拒绝；仅对 ADN 编号从 ATTACKERS 官方详情补缺失的导演、片商和时长 |
 | FANZA | 现代 `/av/content/` Product JSON-LD；不从 CID 猜番号，不支持未经验证的旧目录 |
 | MGStage | 原生产品 URL/品番详情；保留数字前缀；遇年龄门槛不设置确认 Cookie |
 | DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
@@ -107,7 +107,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 来源查询也服务于既有身份回查，不能仅凭方法签名声称识别出了“手动调用”。这些元数据查询没有文件路径，因此不套用 qBittorrent 自动触发目录规则；实际手动文件操作仍由 MoviePilot 手动入口和用户选择决定。独立页面另有源目录和目标目录范围校验，部署和实屏验收由环境记录维护。
 
-Manko 的原生同步/异步手动搜索与自动识别会合并完整元数据及演员集合相同、仅标题或简介译文互补的同番号记录，并选用最小原生 ID。出现同语译文冲突、重复语言项、无效译文结构、组内无共同语言锚点、其它未映射字段差异、元数据不完整或演员集合不同，仍保留多个手动候选并拒绝自动选择。已有平面标题可用时，缺少或空的标题译文数组继续兼容。当前演员接口按作品 ID 返回集合，已观察到 `size/page` 参数不改变该集合；此检查比较各作品当前返回值，不证明上游演员目录完整。人工选定原生 ID 后的回查仍保持来源和身份校验。
+Manko 的同步/异步搜索与手动候选接口遵循相同规则：先证明完整搜索总数和精确番号，再按 API 顺序逐个检查精确命中的原生 ID，返回首个包含全部所需刮削数据的原始记录与该 ID 演员列表。标题可使用有效的完整多语言数组，或在数组缺失/为空时使用已有平面标题；简介数组的每行都须有有效语言和简介，日期须符合既有 ISO 日期规则，封面与至少一个不同的背景图须为安全 HTTPS 地址，演员列表须非空且有效。其它未知字段、未映射资源字段和 rating 等差异不改变完整度，也不用于择优；不同 ID 的数据不合并，演员标记与所选原始记录保持一致。所有候选均不完整时拒绝，并在诊断日志以 `title`、`descriptions`、`date`、`cover`、`background`、`actors` 标记缺项。唯一候选及按原生 ID 回查保持原行为；手动选定 ID 后的回查仍保持来源和身份校验。Manko 番号搜索使用 `complete-first-v1` 策略缓存键；旧号码键不再用于读取，本版不主动清理旧键。
 
 V3.1.8 原生文件管理整理窗口选择“电影”后会显示媒体 ID 控件；空 ID 的原生窗口仍依赖既有 MoviePilot 热修才能按来源自动识别，手动填入已知 Manko ID 可按原生流程预览。插件侧栏的独立“Manko 整理”页直接从文件名/允许的父目录提取番号、按明确选择的来源识别并固定身份，不依赖该原生窗口热修。两条入口分开验收；独立页预览成功也不代表硬链接或 NFO/图片已写盘。工作流验收规格见 [Manko 原生识别与整理规格](.scratch/manko-native-workflow/spec.md)。
 
@@ -139,7 +139,7 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 - `transport_unavailable` / `request_exception`：SDK 未返回响应或调用抛出异常；不猜测是代理、DNS、TLS、超时还是其它问题，不编造 HTTP 状态
 - `invalid_json` / `payload_invalid`：响应不能解析为 JSON，或 JSON/base91 载荷不符合既有合同
 - `schema_invalid` / `search_incomplete`：字段形状不兼容，或总数/分页证据不足，无法证明结果完整
-- `no_candidates`：格式和总数通过校验的搜索返回零候选；`no_exact_match`：取得候选详情后没有精确匹配；`ambiguous_match`：多个不同原生 ID 精确命中
+- `no_candidates`：格式和总数通过校验的搜索返回零候选；`no_exact_match`：取得候选详情后没有精确匹配；`ambiguous_match`：保留给其它仍按唯一 ID 规则处理的查询；`metadata_incomplete`：Manko 多 ID 查询找不到完整 packet，`missing` 随后列出固定字段标签
 - `identity_mismatch` / `number_evidence_invalid`：详情身份或番号证据不一致；`actors_invalid` 只表示可选演员列表无效
 - `cache_hit` / `cache_miss`、`accepted` / `empty_result` / `query_exception`：插件查询整体结果；其它来源目前只提供这一层诊断，不据空结果猜测其 HTTP 状态或具体解析原因
 
@@ -149,11 +149,13 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 0.8.7 按本次识别的 Manko packet `actors[*].avdbs_actor is True` 选择女主演；数值 1、字符串 `true`、false 或缺失均不满足。可信候选仅用于目录选择，NFO 保留完整演员列表。执行时自动选择须仍为唯一候选；手动选择须仍匹配且保持 true 标记，不相关候选变化不会使其失效。验证：官方 MoviePilot V3 SDK 定向测试 `372 passed, 7 subtests`；前端测试 `44/44`，production build 成功。候选 1 的 6 个失败是 SDK `MediaInfo.to_dict()` 暴露动态私有属性；候选 2 改用插件内弱引用证据映射后全组通过。新版页面现场 ABF-382 自动选角预览为 1 success/0 failed，未执行整理；ADN-765 预览在既有来源身份候选歧义处停止，未进入女主演规则判定。部署审计摘要及证据链接见上文。
 
+0.8.8 将同番号多 ID 选择改为 API 顺序下的完整数据包选择，不按 ID 最小值、译文数量或未映射字段差异择优，也不拼接记录。正式 MoviePilot V3 SDK 定向回归 `503 passed, 7 subtests`。已部署生产并审计 73 runtime 文件；部署清单中 core 有 6 个文件、public 有 1167 个文件；配置与 binding revision 9、3 个下载源及对应媒体、3 份 ledger 和两份 metadata 缓存均保持，自动整理 off、unarmed、queue 0。现场 `GET /media/search` 的 ADN-765 与 ADN-775 各返回 1 项且标题、简介、图像、日期及时长字段完整；前后状态与备份基线均保持。证据见[GET smoke](../outputs/manko-scrape-data-selection-20261024/live-search-smoke.log)和[最终审计](../outputs/manko-scrape-data-selection-20261024/final-audit.jsonl)。无前端改动，因此未新增前端测试或 build；本次未做 Chrome 新 UI 验收、preview、transfer 或 scrape。
+
 0.8.6 在独立目录浏览器中支持名称升/降序、修改时间新/旧排序及文件大小大/小排序，目录始终优先；同名和主键相同时以名称/路径稳定排序，无效或缺失的数值元数据置于同组末尾。浏览项目的 `modify_time`（Unix 秒）与 `size`（字节）是可空返回字段，旧响应仍兼容；前端排序只处理当前目录列表，不额外请求接口或改动手动选择路径。
 
 0.8.5 调整自动匹配规则的本地网格布局，为浮动标签留出说明后的空间；窄屏下字段改为单列，来源路径可随内容增高，目标完整路径可通过提示查看。自动规则字段、浏览动作和保存行为保持原合同。
 
-0.8.3 在完整等价检查中合并互补的 Manko 标题与简介译文，保留最小原生 ID；同语言冲突、重复语言项、无效译文结构、无共同语言锚点或其它字段不一致时仍拒绝自动合并。只含平面标题的旧记录仍可通过插件识别和手动搜索。
+0.8.3 当时在完整等价检查中合并互补的 Manko 标题与简介译文，保留最小原生 ID；同语言冲突、重复语言项、无效译文结构、无共同语言锚点或其它字段不一致时仍拒绝自动合并。只含平面标题的旧记录仍可通过插件识别和手动搜索；该历史策略已由 0.8.8 的 API 顺序完整数据包策略取代。
 
 0.8.4 增加可选女主演目录：目录名只来自完整 ATTACKERS 官方“女優”行与本片演员的精确匹配；信息不足时要求手动选择，自动整理明确停止。预览/执行持续复核演员选择和子目录安全性，默认保持关闭。2026-10-23 验证通过：官方 V3 SDK 隔离合成回归 `1552 passed, 7 subtests`（含 synthetic real-native 执行和完整刮削），Vue 组件测试 `36/36`，dist build 成功。该日部署阶段，ADN-765 与 ADN-775 在无 ID、无人工选择时的 NAS preview 均成功；当日仅做 preview，没有执行整理。2026-10-24 随后通过 MoviePilot 原生 reorganize 接口完成两部影片整理，硬链接、源 SHA、NFO 和图像审计通过，详见[真实整理记录](../records/manko-actress-reorganize-2026-10-24.md)。
 

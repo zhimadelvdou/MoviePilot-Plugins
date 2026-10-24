@@ -44,7 +44,10 @@ def extract_number(text: str) -> str | None:
 def record_numbers(record: dict) -> set[str]:
     """从已知编号及多语标题字段取证，不把服务端原生 ID 当作番号。"""
     texts = [record.get(key) for key in ("number", "code", "serial_number", "jav_id", "title", "name")]
-    texts.extend(item.get("title") for item in record.get("title_display_name", []) if isinstance(item, dict))
+    title_entries = record.get("title_display_name")
+    if not isinstance(title_entries, list):
+        title_entries = []
+    texts.extend(item.get("title") for item in title_entries if isinstance(item, dict))
     return {normalize_number(match.group()) for text in texts if isinstance(text, str) for match in NUMBER.finditer(text)}
 
 
@@ -131,10 +134,16 @@ def _named_entities(value: object) -> list[dict[str, str]]:
 
 def project_record(record: dict, number: str, actors: list[dict], allowed_hosts: tuple[str, ...], source: str = SOURCE) -> dict:
     """构造 V3 规范媒体身份，不伪造 TMDB/IMDb 身份。"""
-    titles = [v for v in record.get("title_display_name", []) if isinstance(v, dict) and isinstance(v.get("title"), str)]
+    title_entries = record.get("title_display_name")
+    if not isinstance(title_entries, list):
+        title_entries = []
+    titles = [v for v in title_entries if isinstance(v, dict) and isinstance(v.get("title"), str)]
     titles.sort(key=lambda v: {"zh": 0, "ja": 1, "en": 2}.get(v.get("language"), 3))
     title = titles[0]["title"] if titles else record.get("title") or number
-    descriptions = [v for v in record.get("discription", []) if isinstance(v, dict) and isinstance(v.get("overview"), str)]
+    description_entries = record.get("discription")
+    if not isinstance(description_entries, list):
+        description_entries = []
+    descriptions = [v for v in description_entries if isinstance(v, dict) and isinstance(v.get("overview"), str)]
     descriptions.sort(key=lambda v: {"zh": 0, "ja": 1, "en": 2}.get(v.get("language"), 3))
     date = str(record.get("share_date") or "")
     date = date[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", date) else ""

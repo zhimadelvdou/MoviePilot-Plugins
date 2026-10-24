@@ -5,25 +5,16 @@ from __future__ import annotations
 
 import json
 import math
-from copy import deepcopy
 from datetime import date
 from urllib.parse import urlsplit
 from .transport import AnonymousAsyncRequestUtils as AsyncRequestUtils, AnonymousRequestUtils as RequestUtils
 from app.sdk.config import settings
-from .core import IDENTIFIER, exact_candidate, normalize_number, record_numbers
+from .core import IDENTIFIER, exact_candidate, normalize_number, record_numbers, safe_image_url
 from .diagnostics import diagnose
 from .official_metadata import OfficialMetadataProvider
 
 API = "https://healertanker.com/swx/movie"
 ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"'
-_EQUIVALENT_TRANSPORT_FIELDS = frozenset({
-    "_id", "category_id", "jable_hls", "missav_video", "mmtv_embed",
-    "mmtv_m3u8", "mmtv_time", "njav_player", "upload18_player",
-    "wasabi_embed_url", "wasabi_url_1",
-})
-_KEEP_TRANSLATION_FIELD = object()
-
-
 def decode_payload(response: dict | None) -> dict:
     """接受原生 JSON 或上游 base91 数据；畸形和超大载荷失败关闭。"""
     if not isinstance(response, dict):
@@ -214,148 +205,73 @@ class MankoProvider:
                           separators=(",", ":"), allow_nan=False)
 
     @staticmethod
-    def _record_metadata_complete(record):
-        """Require every metadata field that makes automatic equivalence useful."""
-        titles = record.get("title_display_name")
-        has_display_title = isinstance(titles, list) and any(
-            isinstance(item, dict) and isinstance(item.get("title"), str)
-            and item["title"].strip() and isinstance(item.get("language"), str)
-            and item["language"].strip()
-            for item in titles
-        )
-        if not has_display_title and not (isinstance(record.get("title"), str) and record["title"].strip()):
+    def _translation_array_valid(value, text_key):
+        """Validate every supplied translation row; no language is mandatory."""
+        if not isinstance(value, list) or not value:
             return False
-
-        share_date = record.get("share_date")
-        if not isinstance(share_date, str) or len(share_date) < 10:
-            return False
-        try:
-            date.fromisoformat(share_date[:10])
-        except ValueError:
-            return False
-
-        cover = record.get("cover_image")
-        if not isinstance(cover, str) or not cover.strip():
-            return False
-        try:
-            parsed = urlsplit(cover)
-            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        languages = set()
+        for entry in value:
+            if not isinstance(entry, dict):
                 return False
-        except ValueError:
-            return False
-
-        descriptions = record.get("discription")
-        if not isinstance(descriptions, list) or not any(
-            isinstance(item, dict) and isinstance(item.get("overview"), str)
-            and item["overview"].strip() and isinstance(item.get("language"), str)
-            and item["language"].strip()
-            for item in descriptions
-        ):
-            return False
+            language, text = entry.get("language"), entry.get(text_key)
+            if (not isinstance(language, str) or not language.strip()
+                    or not isinstance(text, str) or not text.strip()):
+                return False
+            key = language.strip().casefold()
+            if key in languages:
+                return False
+            languages.add(key)
         return True
 
     @staticmethod
-    def _translation_entries(record, field, text_key):
-        """Validate one translation array without discarding per-entry metadata."""
-        items = record.get(field)
-        if not isinstance(items, list) or not items:
-            return None
-        entries = {}
+    def _valid_image_url(value):
+        """Check URL safety without applying a user's optional image host allowlist."""
+        if not isinstance(value, str):
+            return False
         try:
-            for item in items:
-                if not isinstance(item, dict):
-                    return None
-                language = item.get("language")
-                text = item.get(text_key)
-                if (not isinstance(language, str) or not language or language.strip() != language
-                        or not isinstance(text, str) or not text.strip()):
-                    return None
-                # Manko language codes are case-insensitive identifiers. Keep the
-                # original item for output, but compare keys and signatures by code.
-                language_key = language.casefold()
-                if language_key in entries:
-                    # Repeated language records can conceal conflicting content or fields.
-                    return None
-                allowed_keys = {"language", text_key, "also_known_as"}
-                if set(item) - allowed_keys:
-                    return None
-                aliases = item.get("also_known_as", [])
-                if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
-                    return None
-                signature = deepcopy(item)
-                signature["language"] = language_key
-                entries[language_key] = (MankoProvider._canonical_json(signature), deepcopy(item))
-        except (TypeError, ValueError):
-            diagnose("manko", "search", "schema_invalid")
-            return None
-        return entries
+            host = urlsplit(value).hostname
+        except ValueError:
+            return False
+        return bool(host and safe_image_url(value, (host.lower(),)) == value)
 
     @staticmethod
-    def _merge_translation_field(records, field, text_key):
-        values = [record.get(field) for record in records]
-        # Old records may carry only the flat `title` field. Preserve that shape
-        # (or normalize an explicitly empty list) instead of adding None, which
-        # downstream projection attempts to iterate.
-        if field == "title_display_name" and all(value is None or value == [] for value in values):
-            return True, [] if any(field in record for record in records) else _KEEP_TRANSLATION_FIELD
+    def _record_missing_fields(record):
+        """Return only fixed field labels needed for complete same-number selection."""
+        missing = []
+        titles = record.get("title_display_name")
+        if isinstance(titles, list) and titles:
+            has_title = MankoProvider._translation_array_valid(titles, "title")
+        else:
+            has_title = isinstance(record.get("title"), str) and bool(record["title"].strip())
+        if not has_title:
+            missing.append("title")
+
+        descriptions = record.get("discription")
+        if not MankoProvider._translation_array_valid(descriptions, "overview"):
+            missing.append("descriptions")
+
+        share_date = record.get("share_date")
         try:
-            encoded = [MankoProvider._canonical_json(value) for value in values]
-        except (TypeError, ValueError):
-            diagnose("manko", "search", "schema_invalid")
-            return False, None
-        if all(value == encoded[0] for value in encoded[1:]):
-            if isinstance(values[0], list) and values[0]:
-                # Equal malformed arrays are still malformed; equality must not
-                # bypass duplicate-language or item-shape validation.
-                if MankoProvider._translation_entries(records[0], field, text_key) is None:
-                    return False, None
-            return True, deepcopy(values[0])
+            valid_date = isinstance(share_date, str) and len(share_date) >= 10
+            if valid_date:
+                date.fromisoformat(share_date[:10])
+        except ValueError:
+            valid_date = False
+        if not valid_date:
+            missing.append("date")
 
-        maps = [MankoProvider._translation_entries(record, field, text_key) for record in records]
-        if any(entries is None for entries in maps):
-            return False, None
-        shared_languages = set(maps[0])
-        for entries in maps[1:]:
-            shared_languages.intersection_update(entries)
-        if not shared_languages:
-            return False, None
+        cover = record.get("cover_image")
+        valid_cover = MankoProvider._valid_image_url(cover)
+        if not valid_cover:
+            missing.append("cover")
 
-        merged = {}
-        order = []
-        for entries in maps:
-            for language, (item_json, item) in entries.items():
-                previous = merged.get(language)
-                if previous is not None and previous[0] != item_json:
-                    return False, None
-                if previous is None:
-                    merged[language] = (item_json, item)
-                    order.append(language)
-        return True, [deepcopy(merged[language][1]) for language in order]
-
-    @staticmethod
-    def _equivalent_record_data(records):
-        """Return a copied canonical record when only translations complement each other."""
-        values = []
-        try:
-            for record in records:
-                comparable = {key: value for key, value in record.items()
-                              if key not in _EQUIVALENT_TRANSPORT_FIELDS
-                              and key not in ("title_display_name", "discription")}
-                values.append(MankoProvider._canonical_json(comparable))
-        except (TypeError, ValueError):
-            diagnose("manko", "search", "schema_invalid")
-            return None
-        if not values or not all(value == values[0] for value in values[1:]):
-            return None
-
-        canonical = deepcopy(records[0])
-        for field, text_key in (("title_display_name", "title"), ("discription", "overview")):
-            valid, merged = MankoProvider._merge_translation_field(records, field, text_key)
-            if not valid:
-                return None
-            if merged is not _KEEP_TRANSLATION_FIELD:
-                canonical[field] = merged
-        return canonical
+        backgrounds = record.get("backdrop_images")
+        valid_background = (isinstance(backgrounds, list) and valid_cover and any(
+            MankoProvider._valid_image_url(url) and url != cover for url in backgrounds
+        ))
+        if not valid_background:
+            missing.append("background")
+        return missing
 
     @staticmethod
     def _complete_actor_list(response):
@@ -381,7 +297,6 @@ class MankoProvider:
         # not as proof of a complete upstream actor catalog.
         if not actors or not all(isinstance(actor.get("name"), str) and actor["name"].strip()
                                  for actor in actors):
-            diagnose("manko", "search", "metadata_incomplete")
             return None
         try:
             MankoProvider._canonical_json(actors)
@@ -390,69 +305,49 @@ class MankoProvider:
             return None
         return actors
 
-    def _equivalent_search_result(self, matches):
-        """Resolve equivalent multi-ID metadata only after strict raw and actor checks."""
-        ordered = sorted(matches.items())
-        records = [record for _, record in ordered]
-        if not all(self._record_metadata_complete(record) for record in records):
-            diagnose("manko", "search", "metadata_incomplete", count=len(records))
-            return None
-        merged_record = self._equivalent_record_data(records)
-        if merged_record is None:
-            return None
-
-        actor_lists = []
-        for identity, _ in ordered:
+    def _select_complete_search_match(self, matches):
+        """Choose the first complete exact-number packet in API order, without merging."""
+        missing_fields = set()
+        for identity, record in matches.items():
+            missing = set(self._record_missing_fields(record))
             try:
-                response = self._get("/actors/" + identity, {"size": 24, "page": 1})
+                actors = self._complete_actor_list(
+                    self._get("/actors/" + identity, {"size": 24, "page": 1}))
             except Exception:
                 diagnose("manko", "actors", "actors_invalid")
-                actor_lists.append(None)
+                actors = None
+            if actors is None:
+                missing.add("actors")
+            if missing:
+                missing_fields.update(missing)
                 continue
-            actor_lists.append(self._complete_actor_list(response))
-        if any(actors is None for actors in actor_lists):
-            return None
-        try:
-            actor_keys = [self._canonical_json(actors) for actors in actor_lists]
-        except (TypeError, ValueError):
-            diagnose("manko", "actors", "actors_invalid")
-            return None
-        if not all(key == actor_keys[0] for key in actor_keys[1:]):
-            return None
-        diagnose("manko", "search", "equivalent_match", count=1)
-        return {"record": merged_record, "actors": actor_lists[0]}
+            diagnose("manko", "search", "exact_match", count=1)
+            return {"record": record, "actors": actors}
+        diagnose("manko", "search", "metadata_incomplete", count=len(matches),
+                 fields=missing_fields)
+        return None
 
-    async def _async_equivalent_search_result(self, matches):
-        """Async counterpart; actor calls stay on the provider's async transport."""
-        ordered = sorted(matches.items())
-        records = [record for _, record in ordered]
-        if not all(self._record_metadata_complete(record) for record in records):
-            diagnose("manko", "search", "metadata_incomplete", count=len(records))
-            return None
-        merged_record = self._equivalent_record_data(records)
-        if merged_record is None:
-            return None
-
-        actor_lists = []
-        for identity, _ in ordered:
+    async def _async_select_complete_search_match(self, matches):
+        """Async counterpart, preserving API candidate order and packet boundaries."""
+        missing_fields = set()
+        for identity, record in matches.items():
+            missing = set(self._record_missing_fields(record))
             try:
                 response = await self._aget("/actors/" + identity, {"size": 24, "page": 1})
+                actors = self._complete_actor_list(response)
             except Exception:
                 diagnose("manko", "actors", "actors_invalid")
-                actor_lists.append(None)
+                actors = None
+            if actors is None:
+                missing.add("actors")
+            if missing:
+                missing_fields.update(missing)
                 continue
-            actor_lists.append(self._complete_actor_list(response))
-        if any(actors is None for actors in actor_lists):
-            return None
-        try:
-            actor_keys = [self._canonical_json(actors) for actors in actor_lists]
-        except (TypeError, ValueError):
-            diagnose("manko", "actors", "actors_invalid")
-            return None
-        if not all(key == actor_keys[0] for key in actor_keys[1:]):
-            return None
-        diagnose("manko", "search", "equivalent_match", count=1)
-        return {"record": merged_record, "actors": actor_lists[0]}
+            diagnose("manko", "search", "exact_match", count=1)
+            return {"record": record, "actors": actors}
+        diagnose("manko", "search", "metadata_incomplete", count=len(matches),
+                 fields=missing_fields)
+        return None
 
     @staticmethod
     def _actors(actors):
@@ -511,11 +406,10 @@ class MankoProvider:
                 return None
         matches = self._matching_records(details, number)
         if len(matches) > 1:
-            equivalent = self._equivalent_search_result(matches)
-            if equivalent is None:
-                self._select(details, number)
+            selected = self._select_complete_search_match(matches)
+            if selected is None:
                 return None
-            return self._supplement({"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}, number)
+            return self._supplement({**selected, "number": number}, number)
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None
@@ -542,11 +436,10 @@ class MankoProvider:
                 return None
         matches = self._matching_records(details, number)
         if len(matches) > 1:
-            equivalent = await self._async_equivalent_search_result(matches)
-            if equivalent is None:
-                self._select(details, number)
+            selected = await self._async_select_complete_search_match(matches)
+            if selected is None:
                 return None
-            return await self._async_supplement({"record": equivalent["record"], "number": number, "actors": equivalent["actors"]}, number)
+            return await self._async_supplement({**selected, "number": number}, number)
         selected = self._select(details, number)
         if not isinstance(selected, dict):
             return None
@@ -575,12 +468,10 @@ class MankoProvider:
         matches = self._matching_records(list(details.values()), number)
         if details:
             if len(matches) > 1:
-                equivalent = self._equivalent_search_result(matches)
-                if equivalent is not None:
-                    packet = {"record": equivalent["record"], "number": number,
-                              "actors": equivalent["actors"]}
-                    return [self._supplement(packet, number)]
-                self._select(list(details.values()), number)
+                selected = self._select_complete_search_match(matches)
+                if selected is not None:
+                    return [self._supplement({**selected, "number": number}, number)]
+                return []
             else:
                 reason = "exact_match" if matches else "no_exact_match"
                 diagnose("manko", "search", reason, count=len(matches))
@@ -612,12 +503,10 @@ class MankoProvider:
         matches = self._matching_records(list(details.values()), number)
         if details:
             if len(matches) > 1:
-                equivalent = await self._async_equivalent_search_result(matches)
-                if equivalent is not None:
-                    packet = {"record": equivalent["record"], "number": number,
-                              "actors": equivalent["actors"]}
-                    return [await self._async_supplement(packet, number)]
-                self._select(list(details.values()), number)
+                selected = await self._async_select_complete_search_match(matches)
+                if selected is not None:
+                    return [await self._async_supplement({**selected, "number": number}, number)]
+                return []
             else:
                 reason = "exact_match" if matches else "no_exact_match"
                 diagnose("manko", "search", reason, count=len(matches))

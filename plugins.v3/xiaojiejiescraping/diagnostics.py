@@ -17,9 +17,10 @@ _REASONS = frozenset({
     "ambiguous_match", "exact_match", "equivalent_match", "metadata_incomplete",
     "number_evidence_invalid", "actors_invalid",
 })
+_MISSING_FIELDS = ("title", "descriptions", "date", "cover", "background", "actors")
 
 
-def diagnose(source, operation, reason, *, status=None, count=None):
+def diagnose(source, operation, reason, *, status=None, count=None, fields=None):
     """字段须命中固定词表；状态仅接收真实响应的整数，不猜测异常消息。
 
     不接受 URL、请求参数、身份、番号、路径、标题、响应正文或异常对象。
@@ -33,6 +34,10 @@ def diagnose(source, operation, reason, *, status=None, count=None):
         message += f" http_status={status}"
     if type(count) is int and 0 <= count <= 10000:
         message += f" count={count}"
+    if isinstance(fields, (list, tuple, set, frozenset)):
+        missing = [field for field in _MISSING_FIELDS if field in fields]
+        if missing:
+            message += " missing=" + ",".join(missing)
     try:
         logger.info(message)
     except Exception:

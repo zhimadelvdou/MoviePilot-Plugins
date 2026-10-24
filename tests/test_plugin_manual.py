@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from app.api.endpoints.plugin import get_current_active_superuser
 
 from app.plugins.xiaojiejiescraping import XiaojiejieScraping
-from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest, ManualTransferWorkspace
+from app.plugins.xiaojiejiescraping.manual import ManualBrowseItem, ManualPreviewRequest, ManualTransferWorkspace
 from app.plugins.xiaojiejiescraping.manual_api import api_routes
 
 
@@ -118,6 +118,36 @@ def test_manual_browse_starts_from_local_root_and_keeps_roots_as_shortcuts(manua
     assert options.roots
     assert listing.path == str(Path("/"))
     assert listing.parent is None
+
+
+def test_manual_browse_returns_metadata_for_allowed_items_and_keeps_legacy_model_compatible(manual_workspace):
+    _, workspace, root, target, _, _ = manual_workspace
+    video = root / "TEST-456.mp4"
+    video.write_bytes(b"video bytes")
+    os.utime(video, (1_700_000_002, 1_700_000_002))
+    folder = root / "Folder 2"
+    folder.mkdir()
+    os.utime(folder, (1_700_000_001, 1_700_000_001))
+    (root / "notes.txt").write_text("ignored", encoding="utf-8")
+
+    source_listing = workspace.browse(str(root), "source")
+    source_items = {item.name: item for item in source_listing.items}
+    assert set(source_items) == {"TEST-123.mkv", "TEST-456.mp4", "Folder 2"}
+    assert source_items["TEST-456.mp4"].modify_time == pytest.approx(1_700_000_002)
+    assert source_items["TEST-456.mp4"].size == len(b"video bytes")
+    assert source_items["Folder 2"].modify_time == pytest.approx(1_700_000_001)
+    assert source_items["Folder 2"].size is None
+
+    target_folder = target / "Library Folder"
+    target_folder.mkdir()
+    (target / "ignored.mp4").write_bytes(b"target files are not selectable")
+    target_listing = workspace.browse(str(target), "target")
+    assert [item.name for item in target_listing.items] == ["Library Folder"]
+    assert target_listing.items[0].size is None
+
+    legacy_item = ManualBrowseItem.model_validate({"name": "legacy.mp4", "path": "/legacy.mp4", "type": "file"})
+    assert legacy_item.modify_time is None
+    assert legacy_item.size is None
 
 
 @pytest.mark.parametrize("path", ["../outside/TEST-123.mkv"])

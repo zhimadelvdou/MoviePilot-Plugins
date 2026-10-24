@@ -251,6 +251,84 @@ describe('manual transfer page', () => {
     expect(wrapper.get('main').attributes('data-host-theme')).toBe('dark')
   })
 
+  it.each([
+    ['name-asc', ['Folder 2', 'Folder 10', 'clip 2.mp4', 'clip 10.mp4', 'invalid.mp4', 'same.mp4', 'same.mp4', 'unknown.mp4', 'zero.mp4']],
+    ['name-desc', ['Folder 10', 'Folder 2', 'zero.mp4', 'unknown.mp4', 'same.mp4', 'same.mp4', 'invalid.mp4', 'clip 10.mp4', 'clip 2.mp4']],
+    ['modified-desc', ['Folder 10', 'Folder 2', 'clip 2.mp4', 'clip 10.mp4', 'same.mp4', 'same.mp4', 'zero.mp4', 'invalid.mp4', 'unknown.mp4']],
+    ['modified-asc', ['Folder 2', 'Folder 10', 'zero.mp4', 'clip 2.mp4', 'clip 10.mp4', 'same.mp4', 'same.mp4', 'invalid.mp4', 'unknown.mp4']],
+    ['size-desc', ['Folder 2', 'Folder 10', 'clip 2.mp4', 'same.mp4', 'same.mp4', 'clip 10.mp4', 'zero.mp4', 'invalid.mp4', 'unknown.mp4']],
+    ['size-asc', ['Folder 2', 'Folder 10', 'zero.mp4', 'clip 10.mp4', 'same.mp4', 'same.mp4', 'clip 2.mp4', 'invalid.mp4', 'unknown.mp4']],
+  ])('sorts browser entries by %s with directories first and local-only updates', async (sort, expectedNames) => {
+    const { api, wrapper } = setup()
+    const entries = [
+      { name: 'Folder 10', path: '/downloads/Folder 10', type: 'dir', modify_time: 200, size: null },
+      { name: 'Folder 2', path: '/downloads/Folder 2', type: 'dir', modify_time: 100, size: null },
+      { name: 'clip 10.mp4', path: '/downloads/clip 10.mp4', type: 'file', modify_time: 20, size: 2 },
+      { name: 'clip 2.mp4', path: '/downloads/clip 2.mp4', type: 'file', modify_time: 20, size: 10 },
+      { name: 'zero.mp4', path: '/downloads/zero.mp4', type: 'file', modify_time: 0, size: 0 },
+      { name: 'invalid.mp4', path: '/downloads/invalid.mp4', type: 'file', modify_time: 'invalid', size: -1 },
+      { name: 'unknown.mp4', path: '/downloads/unknown.mp4', type: 'file' },
+      { name: 'same.mp4', path: '/downloads/z/same.mp4', type: 'file', modify_time: 20, size: 5 },
+      { name: 'same.mp4', path: '/downloads/a/same.mp4', type: 'file', modify_time: 20, size: 5 },
+    ]
+    api.get.mockImplementation(async (url, request) => {
+      if (url.endsWith('/options')) return options
+      if (url.endsWith('/automatic/status')) return automaticStatus
+      if (url === 'plugin/plugin-x') return { success: true, message: '', data: { ...initialPluginConfig } }
+      if (url === 'download/clients') return { success: true, message: '', data: [] }
+      if (url.endsWith('/manual/browse')) return { path: request.params.path, parent: '/', items: entries }
+      return {}
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="browse-source"]').trigger('click')
+    await flushPromises()
+    const browseCalls = () => api.get.mock.calls.filter(([url]) => url.endsWith('/manual/browse')).length
+    expect(browseCalls()).toBe(1)
+    await selectValue(wrapper, 'browse-sort', sort)
+    const rows = [...document.body.querySelectorAll('[data-testid="browse-item"]')]
+    expect(rows.map(row => row.querySelector('.v-list-item-title')?.textContent.trim())).toEqual(expectedNames)
+    expect(rows.filter(row => row.textContent.includes('/downloads/a/same.mp4'))[0]).toBeTruthy()
+    expect(browseCalls()).toBe(1)
+  })
+
+  it('keeps the chosen sort while navigating and selects the original path from the sorted browser row', async () => {
+    const { api, wrapper } = setup()
+    api.get.mockImplementation(async (url, request) => {
+      if (url.endsWith('/options')) return options
+      if (url.endsWith('/automatic/status')) return automaticStatus
+      if (url === 'plugin/plugin-x') return { success: true, message: '', data: { ...initialPluginConfig } }
+      if (url === 'download/clients') return { success: true, message: '', data: [] }
+      if (url.endsWith('/manual/browse')) return request.params.path === '/downloads'
+        ? { path: '/downloads', parent: '/', items: [
+            { name: 'Folder 10', path: '/downloads/Folder 10', type: 'dir' },
+            { name: 'Folder 2', path: '/downloads/Folder 2', type: 'dir' },
+          ] }
+        : { path: request.params.path, parent: '/downloads', items: [
+            { name: 'Picked 10.mp4', path: `${request.params.path}/Picked 10.mp4`, type: 'file', size: 10 },
+            { name: 'Picked 2.mp4', path: `${request.params.path}/Picked 2.mp4`, type: 'file', size: 2 },
+          ] }
+      return {}
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="browse-source"]').trigger('click')
+    await flushPromises()
+    await selectValue(wrapper, 'browse-sort', 'size-asc')
+    const folder = [...document.body.querySelectorAll('[data-testid="browse-item"]')]
+      .find(row => row.querySelector('.v-list-item-title')?.textContent.trim() === 'Folder 2')
+    expect(folder).toBeTruthy()
+    folder.click()
+    await flushPromises()
+    expect(selectComponent(wrapper, 'browse-sort').props('modelValue')).toBe('size-asc')
+    const selected = [...document.body.querySelectorAll('[data-testid="browse-item"]')]
+      .find(row => row.querySelector('.v-list-item-title')?.textContent.trim() === 'Picked 2.mp4')
+    expect(selected).toBeTruthy()
+    selected.click()
+    await flushPromises()
+    expect(inputFor(wrapper, 'source-path').element.value).toBe('/downloads/Folder 2/Picked 2.mp4')
+    expect(api.get.mock.calls.filter(([url]) => url.endsWith('/manual/browse')).map(([, request]) => request.params.path))
+      .toEqual(['/downloads', '/downloads/Folder 2'])
+  })
+
   it('reports backend matching mode and keeps old configs on legacy AND when the field is absent', async () => {
     const { api, wrapper } = setup()
     api.get.mockImplementation(async url => {

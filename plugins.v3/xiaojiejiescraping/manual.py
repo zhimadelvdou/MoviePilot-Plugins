@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
+import stat as stat_module
 import time
 import uuid
 
@@ -37,6 +39,8 @@ class ManualBrowseItem(BaseModel):
     name: str
     path: str
     type: str
+    modify_time: float | None = None
+    size: int | None = None
 
 
 class ManualBrowse(BaseModel):
@@ -259,9 +263,21 @@ class ManualTransferWorkspace:
                     continue
                 child_path = _local_path(str(child), directory=True)
                 if child_path:
-                    items.append(ManualBrowseItem(name=child.name, path=str(child), type="dir"))
+                    item_type = "dir"
                 elif kind == "source" and _local_path(str(child), directory=False) and child.suffix.lower() in VIDEO_EXTENSIONS:
-                    items.append(ManualBrowseItem(name=child.name, path=str(child), type="file"))
+                    item_type = "file"
+                else:
+                    continue
+                try:
+                    child_stat = child.lstat()
+                except OSError:
+                    child_stat = None
+                if child_stat is not None and stat_module.S_ISLNK(child_stat.st_mode):
+                    continue
+                modify_time = child_stat.st_mtime if child_stat and math.isfinite(child_stat.st_mtime) else None
+                size = child_stat.st_size if item_type == "file" and child_stat and child_stat.st_size >= 0 else None
+                items.append(ManualBrowseItem(name=child.name, path=str(child), type=item_type,
+                                              modify_time=modify_time, size=size))
                 if len(items) > MAX_SCAN_ENTRIES:
                     raise ValueError("目录条目超过限制")
         except OSError as exc:

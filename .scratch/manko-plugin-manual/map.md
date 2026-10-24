@@ -6,6 +6,7 @@
 - [实施票](issues/01-plugin-manual-entry.md)：已完成实现、隔离回归、部署及浏览器预览。
 - [表单布局修复票](issues/02-automatic-rule-layout.md)：自动匹配规则说明与表单间距及路径控件布局。
 - [表单布局修复结论](issues/02-automatic-rule-layout.md)：0.8.5 在 1920/768/390 像素宽度实页验收通过；36 项测试、最终构建和部署保护检查通过，未执行媒体操作。
+- [手动目录排序票与验收结论](issues/03-manual-browser-sorting.md)：0.8.6 支持名称、修改时间和大小六种本地排序，目录始终优先；SDK 32 passed、前端 43/43、build 与 Chrome 91 条目实页检查通过，未执行媒体操作。
 
 ## Decisions-so-far
 

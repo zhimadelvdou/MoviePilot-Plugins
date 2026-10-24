@@ -23,6 +23,16 @@ const browsePurpose = ref('manual')
 const browsePath = ref('')
 const parentPath = ref('')
 const browseItems = ref([])
+const browseSort = ref('name-asc')
+const browseSortItems = [
+  { title: '名称升序', value: 'name-asc' },
+  { title: '名称降序', value: 'name-desc' },
+  { title: '修改时间：新到旧', value: 'modified-desc' },
+  { title: '修改时间：旧到新', value: 'modified-asc' },
+  { title: '文件大小：大到小', value: 'size-desc' },
+  { title: '文件大小：小到大', value: 'size-asc' },
+]
+const browseNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 const now = ref(Date.now())
 const pendingPreviewId = ref('')
 const automaticStatus = ref(null)
@@ -51,6 +61,39 @@ const displayItems = computed(() => {
     transferState: executionItems.find(result => result.source === item.source && result.target === item.target)?.state,
     completionScope: executionItems.find(result => result.source === item.source && result.target === item.target)?.completion_scope,
   }))
+})
+const sortedBrowseItems = computed(() => {
+  const sortSpecs = {
+    'name-asc': { field: 'name', direction: 1 },
+    'name-desc': { field: 'name', direction: -1 },
+    'modified-asc': { field: 'modify_time', direction: 1 },
+    'modified-desc': { field: 'modify_time', direction: -1 },
+    'size-asc': { field: 'size', direction: 1 },
+    'size-desc': { field: 'size', direction: -1 },
+  }
+  const { field, direction } = sortSpecs[browseSort.value] || sortSpecs['name-asc']
+  const comparePath = (left, right) => left === right ? 0 : left < right ? -1 : 1
+  const compareName = (left, right) => browseNameCollator.compare(left.name || '', right.name || '')
+  const compareNameThenPath = (left, right) => compareName(left, right) || comparePath(left.path || '', right.path || '')
+  const numericValue = (item) => {
+    const value = item?.[field]
+    if (typeof value !== 'number' || !Number.isFinite(value) || (field === 'size' && value < 0)) return null
+    return value
+  }
+  return [...browseItems.value].sort((left, right) => {
+    const leftDirectory = left.type === 'dir' || left.type === 'directory'
+    const rightDirectory = right.type === 'dir' || right.type === 'directory'
+    if (leftDirectory !== rightDirectory) return leftDirectory ? -1 : 1
+    if (field === 'name') return (compareName(left, right) * direction) || comparePath(left.path || '', right.path || '')
+    const leftValue = numericValue(left)
+    const rightValue = numericValue(right)
+    if (leftValue === null && rightValue !== null) return 1
+    if (leftValue !== null && rightValue === null) return -1
+    if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {
+      return (leftValue < rightValue ? -1 : 1) * direction
+    }
+    return compareNameThenPath(left, right)
+  })
 })
 const previewExpired = computed(() => !preview.value || !Number.isFinite(previewExpiryMs.value) || previewExpiryMs.value <= now.value)
 const executionLocked = computed(() => outcome.value === 'pendingaccepted' || outcome.value === 'unknown')
@@ -467,8 +510,12 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
     </VCard>
     <VDialog v-model="browser" max-width="720" scrollable aria-label="浏览目录"><VCard><VCardTitle class="d-flex align-center justify-space-between">选择{{ browsePurpose === 'automatic' && browseKind === 'source' ? '自动来源' : browseKind === 'source' ? '来源' : '目标' }}路径<VBtn icon="mdi-close" variant="text" aria-label="关闭目录浏览" @click="browser = false" /></VCardTitle><VCardText>
       <div v-if="browseKind === 'source' && options?.roots?.length" class="d-flex flex-wrap ga-2 mb-3"><VChip>常用来源目录</VChip><VBtn v-for="root in options.roots" :key="root" size="small" variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse(root)">{{ root }}</VBtn></div>
-      <VTextField label="当前路径" :model-value="browsePath" readonly /><div class="d-flex flex-wrap ga-2 mb-3"><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !parentPath" @click="loadBrowse(parentPath)">返回上级目录</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse('/')">从根目录浏览</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="loadBrowse()">刷新当前目录</VBtn></div>
-      <VList density="compact"><VListItem v-for="item in browseItems" :key="item.path" :title="item.name" :subtitle="item.path" :disabled="browsePurpose === 'automatic' && browseKind === 'source' && item.type !== 'dir' && item.type !== 'directory'" data-testid="browse-item" @click="chooseItem(item)" /></VList>
+      <VTextField label="当前路径" :model-value="browsePath" readonly />
+      <div class="browse-toolbar">
+        <VSelect data-testid="browse-sort" class="browse-sort" label="排序方式" density="compact" hide-details :items="browseSortItems" item-title="title" item-value="value" :model-value="browseSort" :disabled="formLocked || (browsePurpose === 'automatic' && automaticRulesBusy)" @update:model-value="browseSort = $event" />
+        <div class="browse-navigation"><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !parentPath" @click="loadBrowse(parentPath)">返回上级目录</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse('/')">从根目录浏览</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="loadBrowse()">刷新当前目录</VBtn></div>
+      </div>
+      <VList density="compact"><VListItem v-for="item in sortedBrowseItems" :key="item.path" class="browse-item" :title="item.name" :subtitle="item.path" :disabled="browsePurpose === 'automatic' && browseKind === 'source' && item.type !== 'dir' && item.type !== 'directory'" data-testid="browse-item" @click="chooseItem(item)" /></VList>
     </VCardText><VCardActions><VSpacer/><VBtn variant="text" @click="browser = false">取消</VBtn><VBtn data-testid="choose-browse-directory" color="primary" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="chooseCurrentDirectory">{{ browsePurpose === 'automatic' && browseKind === 'source' ? '追加此来源目录' : '选择此目录' }}</VBtn></VCardActions></VCard></VDialog>
     </VContainer>
   </main>
@@ -477,6 +524,7 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 <style scoped>
 .manual-page{min-height:100vh}.automatic-details{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:12px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}
 .automatic-rule-groups{display:grid;gap:16px;margin-top:20px}.automatic-rule-match-grid,.automatic-rule-path-grid{display:grid;align-items:stretch;gap:12px 16px;min-width:0}.automatic-rule-match-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.automatic-rule-path-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automatic-rule-path-control{display:flex;gap:8px;min-width:0;flex-direction:column;align-items:flex-start}.automatic-rule-path-control>.v-input{align-self:stretch;flex:0 0 auto}.automatic-rule-browse{margin-top:auto}
+.browse-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;min-width:0;margin-top:16px;margin-bottom:12px}.browse-sort{flex:0 1 300px;min-width:min(100%,220px)}.browse-navigation{display:flex;flex:1 1 420px;flex-wrap:wrap;gap:8px;min-width:0}.browse-item{min-width:0}:deep(.browse-item .v-list-item__content){min-width:0}:deep(.browse-item .v-list-item-title),:deep(.browse-item .v-list-item-subtitle){white-space:normal;overflow-wrap:anywhere}
 @media(max-width:600px){.automatic-details{grid-template-columns:1fr;gap:2px}.automatic-details dd{margin-bottom:8px}}
 @media(max-width:960px){.automatic-rule-match-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automatic-rule-match-grid>:first-child{grid-column:1/-1}}
 @media(max-width:600px){.automatic-rule-match-grid,.automatic-rule-path-grid{grid-template-columns:minmax(0,1fr)}.automatic-rule-match-grid>:first-child{grid-column:auto}.automatic-rule-path-control>.automatic-rule-browse{margin-top:0}}

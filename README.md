@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.3 在官方 MoviePilot V3 SDK 离线回归通过 `1544 tests` 和 `7 subtests`。真实现场累计核验两个 Manko 样本：ADN-765 的既有整理与刮削，以及 ADN-775 本轮原生无 ID 预览、单次硬链接整理和 NFO/图片刮削审计。两次核验均未改动源媒体；ADN-775 的目标与源为同一 inode。现场证据见[ADN-765 专题记录](../records/manko-metadata-artwork-fix-2026-10-22.md)和[ADN-775 翻译去重记录](../records/manko-translation-dedup-fix-2026-10-23.md)。其它来源和真实 qBittorrent 新下载自动整理仍未验收。默认禁用，自动模式默认只读发现。
+这是开发版本。0.8.5 修复自动匹配规则说明与浮动标签重叠，并整理来源/目标路径控件布局；自动触发默认禁用。0.8.4 在官方 MoviePilot V3 SDK 离线回归通过 `1552 passed, 7 subtests`。真实现场累计核验两个 Manko 样本：ADN-765 的既有整理与刮削，以及 ADN-775 本轮原生无 ID 预览、单次硬链接整理和 NFO/图片刮削审计。两次核验均未改动源媒体；ADN-775 的目标与源为同一 inode。现场证据见[ADN-765 专题记录](../records/manko-metadata-artwork-fix-2026-10-22.md)和[ADN-775 翻译去重记录](../records/manko-translation-dedup-fix-2026-10-23.md)。其它来源和真实 qBittorrent 新下载自动整理仍未验收。默认禁用，自动模式默认只读发现。
 
 ## 功能与边界
 
@@ -147,9 +147,11 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 ## 测试、版本与许可
 
+0.8.5 调整自动匹配规则的本地网格布局，为浮动标签留出说明后的空间；窄屏下字段改为单列，来源路径可随内容增高，目标完整路径可通过提示查看。自动规则字段、浏览动作和保存行为保持原合同。
+
 0.8.3 在完整等价检查中合并互补的 Manko 标题与简介译文，保留最小原生 ID；同语言冲突、重复语言项、无效译文结构、无共同语言锚点或其它字段不一致时仍拒绝自动合并。只含平面标题的旧记录仍可通过插件识别和手动搜索。
 
-0.8.4 增加可选女主演目录：目录名只来自完整 ATTACKERS 官方“女優”行与本片演员的精确匹配；信息不足时要求手动选择，自动整理明确停止。预览/执行持续复核演员选择和子目录安全性，默认保持关闭。2026-10-23 验证通过：官方 V3 SDK 隔离合成回归 `1552 passed, 7 subtests`（含 synthetic real-native 执行和完整刮削），Vue 组件测试 `36/36`，dist build 成功。现场部署后，ADN-765 与 ADN-775 在无 ID、无人工选择时的 NAS preview 均成功，返回预期女演员子目录目标；现场审计确认来源与 manifest 匹配、源文件状态及 nlink 保持、账本和既有目录/sidecars 不变。此次现场只做了 preview，没有执行新的 NAS 整理或迁移，也没有创建新的 NAS 目录；实际硬链接、改名和刮削落盘仍待单独现场执行验证。
+0.8.4 增加可选女主演目录：目录名只来自完整 ATTACKERS 官方“女優”行与本片演员的精确匹配；信息不足时要求手动选择，自动整理明确停止。预览/执行持续复核演员选择和子目录安全性，默认保持关闭。2026-10-23 验证通过：官方 V3 SDK 隔离合成回归 `1552 passed, 7 subtests`（含 synthetic real-native 执行和完整刮削），Vue 组件测试 `36/36`，dist build 成功。该日部署阶段，ADN-765 与 ADN-775 在无 ID、无人工选择时的 NAS preview 均成功；当日仅做 preview，没有执行整理。2026-10-24 随后通过 MoviePilot 原生 reorganize 接口完成两部影片整理，硬链接、源 SHA、NFO 和图像审计通过，详见[真实整理记录](../records/manko-actress-reorganize-2026-10-24.md)。
 
 0.8.3 使用官方 MoviePilot V3 SDK 的离线合成测试通过 `1544 tests` 和 `7 subtests`。2026-10-23 现场核验中，ADN-775 与 ADN-765 的 Manko 搜索各返回一个规范 ID；ADN-775 在未手填 ID 的原生手动预览中自动识别，且只执行一次。宿主状态确认文件整理完成，源与目标为同一 inode、源 SHA-256 不变；新增 NFO 的身份及标题、年份、简介、演员、导演、片商、时长字段齐全。poster (800×538) 与横向 fanart/backdrop (800×534) 均已生成；背景图与 poster 哈希不同，fanart 与 backdrop 哈希一致。此现场结果覆盖这两个查询样本及 ADN-775 单次整理，不代表真实 qB 新下载自动流程已验收。
 

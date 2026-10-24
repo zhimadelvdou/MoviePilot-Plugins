@@ -422,13 +422,23 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <VAlert v-if="automaticCheckMessage" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticCheckMessage }}</VAlert><VAlert v-if="automaticToggleMessage" data-testid="automatic-toggle-message" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticToggleMessage }}</VAlert>
         <VDivider class="my-4" />
         <h2 class="text-h6 mb-2">自动匹配规则</h2><p class="text-body-2">来源路径使用 MoviePilot 文件管理中可见的本地路径。硬链接要求来源与目标位于同一文件系统；不满足时会明确报错，不会改为复制。</p>
-        <VRow>
-          <VCol cols="12" md="6"><VSelect data-testid="automatic-match-mode" label="匹配方式" :items="[{title:'按专用标签',value:'tag'},{title:'按来源路径',value:'path'},{title:'任一满足（标签或路径）',value:'tag_or_path'},{title:'同时满足（标签且路径）',value:'tag_and_path'}]" item-title="title" item-value="value" :model-value="automaticRules.automatic_match_mode" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.automatic_match_mode = $event" /></VCol>
-          <VCol cols="12" md="6"><VSelect data-testid="automatic-downloader" label="qBittorrent 下载器" :items="automaticDownloaderItems" item-title="title" item-value="value" :model-value="automaticRules.downloader" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.downloader = $event" /></VCol>
-          <VCol cols="12" md="6"><VTextField data-testid="automatic-tag" label="专用标签" placeholder="如 Manko" :model-value="automaticRules.torrent_tag" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_tag = $event" /></VCol>
-          <VCol cols="12" md="6"><VTextarea data-testid="automatic-roots" label="来源目录（每行一个绝对路径）" rows="3" :model-value="automaticRules.recognize_dirs" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.recognize_dirs = $event" /><VBtn data-testid="browse-automatic-source" class="mt-1" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('source','automatic')">浏览并追加来源目录</VBtn></VCol>
-          <VCol cols="12" md="6"><VTextField data-testid="automatic-target" label="目标媒体库目录" placeholder="/library" :model-value="automaticRules.target_path" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.target_path = $event" /><VBtn data-testid="browse-automatic-target" class="mt-1" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('target','automatic')">浏览目标目录</VBtn></VCol>
-        </VRow>
+        <div class="automatic-rule-groups">
+          <div class="automatic-rule-match-grid">
+            <VSelect data-testid="automatic-match-mode" label="匹配方式" :items="[{title:'按专用标签',value:'tag'},{title:'按来源路径',value:'path'},{title:'任一满足（标签或路径）',value:'tag_or_path'},{title:'同时满足（标签且路径）',value:'tag_and_path'}]" item-title="title" item-value="value" :model-value="automaticRules.automatic_match_mode" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.automatic_match_mode = $event" />
+            <VSelect data-testid="automatic-downloader" label="qBittorrent 下载器" :items="automaticDownloaderItems" item-title="title" item-value="value" :model-value="automaticRules.downloader" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.downloader = $event" />
+            <VTextField data-testid="automatic-tag" label="专用标签" placeholder="如 Manko" :model-value="automaticRules.torrent_tag" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_tag = $event" />
+          </div>
+          <div class="automatic-rule-path-grid">
+            <div class="automatic-rule-path-control">
+              <VTextarea data-testid="automatic-roots" label="来源目录（每行一个绝对路径）" rows="3" auto-grow :model-value="automaticRules.recognize_dirs" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.recognize_dirs = $event" />
+              <VBtn data-testid="browse-automatic-source" class="automatic-rule-browse" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('source','automatic')">浏览并追加来源目录</VBtn>
+            </div>
+            <div class="automatic-rule-path-control">
+              <VTextField data-testid="automatic-target" label="目标媒体库目录" placeholder="/library" :model-value="automaticRules.target_path" :title="automaticRules.target_path || ''" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.target_path = $event" />
+              <VBtn data-testid="browse-automatic-target" class="automatic-rule-browse" variant="tonal" :disabled="automaticRulesDisabled" @click="openBrowser('target','automatic')">浏览目标目录</VBtn>
+            </div>
+          </div>
+        </div>
         <VAlert v-if="automaticRulesMessage" data-testid="automatic-rules-message" class="mt-2" density="compact" :type="automaticRulesMessage.includes('未确认') || automaticRulesMessage.includes('未能') ? 'warning' : 'success'" variant="tonal">{{ automaticRulesMessage }}</VAlert>
         <div class="d-flex flex-wrap ga-2 mt-3"><VBtn data-testid="automatic-save-rules" color="primary" :loading="automaticRulesBusy" :disabled="automaticRulesDisabled || !automaticRulesCanSave" @click="saveAutomaticRules">保存自动规则</VBtn><VBtn data-testid="automatic-reload-rules" variant="tonal" :disabled="automaticRulesDisabled" @click="loadAutomaticRules">重新读取规则</VBtn></div>
       </VCardText>
@@ -466,5 +476,8 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
 
 <style scoped>
 .manual-page{min-height:100vh}.automatic-details{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:12px 0}.automatic-details dt{font-weight:600}.automatic-details dd{margin:0;overflow-wrap:anywhere}
+.automatic-rule-groups{display:grid;gap:16px;margin-top:20px}.automatic-rule-match-grid,.automatic-rule-path-grid{display:grid;align-items:stretch;gap:12px 16px;min-width:0}.automatic-rule-match-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.automatic-rule-path-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automatic-rule-path-control{display:flex;gap:8px;min-width:0;flex-direction:column;align-items:flex-start}.automatic-rule-path-control>.v-input{align-self:stretch;flex:0 0 auto}.automatic-rule-browse{margin-top:auto}
 @media(max-width:600px){.automatic-details{grid-template-columns:1fr;gap:2px}.automatic-details dd{margin-bottom:8px}}
+@media(max-width:960px){.automatic-rule-match-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automatic-rule-match-grid>:first-child{grid-column:1/-1}}
+@media(max-width:600px){.automatic-rule-match-grid,.automatic-rule-path-grid{grid-template-columns:minmax(0,1fr)}.automatic-rule-match-grid>:first-child{grid-column:auto}.automatic-rule-path-control>.automatic-rule-browse{margin-top:0}}
 </style>

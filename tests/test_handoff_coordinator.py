@@ -128,12 +128,37 @@ def test_invalid_or_unapproved_execution_configuration_cannot_enqueue(handoff, c
     assert HandoffConfig().target() is None
 
 
-def test_auto_handoff_refuses_multiple_trusted_actress_candidates_even_if_one_matches_media(handoff):
+def test_auto_handoff_defaults_to_first_trusted_actress_in_source_order(handoff):
+    config = replace(handoff.config, mode="preview", actress_subfolder=True)
+    names = ["Second Actress", "First Actress"]
+    calls = []
+
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        target = Path(kwargs["target_path"]) / handoff.source.name
+        return True, {"items": [{"source": str(handoff.source), "source_storage": "local",
+                                  "target": str(target), "success": True}]}
+
+    coordinator = HandoffCoordinator(
+        handoff.ledger, config, handoff.recognize, transfer=transfer,
+        history=handoff.history,
+        actress_evidence=lambda _media, _number: (names, names),
+    )
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    assert record is not None
+
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+
+    assert result[0]["state"] == "previewed"
+    assert calls[0]["target_path"] == handoff.output / "Second Actress"
+
+
+def test_auto_handoff_still_fails_when_no_trusted_actress_exists(handoff):
     config = replace(handoff.config, actress_subfolder=True)
     coordinator = HandoffCoordinator(
         handoff.ledger, config, handoff.recognize, transfer=handoff.transfer,
         history=handoff.history,
-        actress_evidence=lambda _media, _number: (["Synthetic Actress", "Other Actress"], ["Synthetic Actress"]),
+        actress_evidence=lambda _media, _number: ([], []),
     )
     record = coordinator.enqueue(handoff.torrent, handoff.source)
     assert record is not None
@@ -153,7 +178,8 @@ def test_auto_handoff_uses_flagged_names_from_fresh_recognition(handoff, tmp_pat
     plugin.init_plugin({"enabled": True, "sources": ["manko"], "recognize_dirs": [str(handoff.inputs)]})
     packet = deepcopy(sample_payload)
     packet["actors"] = [
-        {"name": "Trusted Actress", "avdbs_actor": True},
+        {"name": "Trusted First Actress", "avdbs_actor": True},
+        {"name": "Trusted Second Actress", "avdbs_actor": True},
         {"name": "Unmarked Cast Member", "avdbs_actor": False},
     ]
 
@@ -185,8 +211,8 @@ def test_auto_handoff_uses_flagged_names_from_fresh_recognition(handoff, tmp_pat
     result = coordinator.run_pending(handoff.eligible, handoff.continue_)
 
     assert result[0]["state"] == "previewed"
-    assert calls[0]["target_path"] == handoff.output / "Trusted Actress"
-    assert calls[0]["mediainfo"].actors[1]["name"] == "Unmarked Cast Member"
+    assert calls[0]["target_path"] == handoff.output / "Trusted First Actress"
+    assert calls[0]["mediainfo"].actors[2]["name"] == "Unmarked Cast Member"
     plugin.stop_service()
 
 

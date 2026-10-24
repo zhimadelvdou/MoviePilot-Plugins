@@ -91,6 +91,125 @@ def test_manual_preview_pins_identity_and_duplicate_execute_does_not_resubmit(ma
     assert source.read_bytes() == b"synthetic media"
 
 
+def test_manual_preview_defaults_to_first_trusted_actress_in_source_order(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    names = ["Second Actress", "First Actress"]
+    plugin.actress_evidence = lambda _media, _number: (names, names)
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True,
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].actor_candidates == names
+    assert preview.items[0].selected_actress == "Second Actress"
+    assert calls[0]["target_path"] == target / "Second Actress"
+    result = workspace.execute(preview.preview_id)
+    assert result.state == "accepted"
+    assert len(calls) == 3  # 提交前复核预览 + 一次实际提交
+
+
+def test_manual_preview_accepts_explicit_second_trusted_actress(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    names = ["First Actress", "Second Actress"]
+    plugin.actress_evidence = lambda _media, _number: (names, names)
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True, actress_choices={str(source): "Second Actress"},
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].selected_actress == "Second Actress"
+    assert calls[0]["target_path"] == target / "Second Actress"
+    result = workspace.execute(preview.preview_id)
+    assert result.state == "accepted"
+    assert len(calls) == 3
+
+
+def test_manual_default_choice_is_rejected_if_trusted_source_order_changes(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    order = [["First Actress", "Second Actress"], ["Second Actress", "First Actress"]]
+    evidence_calls = []
+
+    def evidence(_media, _number):
+        names = order[min(len(evidence_calls), 1)]
+        evidence_calls.append(names)
+        return names, names
+
+    plugin.actress_evidence = evidence
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True,
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].selected_actress == "First Actress"
+    result = workspace.execute(preview.preview_id)
+
+    assert result.state == "failed"
+    assert all(call.get("preview") is True for call in calls)
+
+
+def test_manual_second_choice_is_rejected_if_its_trusted_evidence_is_revoked(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    evidence_calls = []
+
+    def evidence(_media, _number):
+        evidence_calls.append(True)
+        names = ["First Actress", "Second Actress"] if len(evidence_calls) == 1 else ["First Actress"]
+        return names, names
+
+    plugin.actress_evidence = evidence
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True, actress_choices={str(source): "Second Actress"},
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].selected_actress == "Second Actress"
+    result = workspace.execute(preview.preview_id)
+
+    assert result.state == "failed"
+    assert all(call.get("preview") is True for call in calls)
+
+
+def test_manual_preview_rejects_invalid_actress_choice_without_fallback(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    names = ["First Actress", "Second Actress"]
+    plugin.actress_evidence = lambda _media, _number: (names, names)
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True, actress_choices={str(source): "Untrusted Actress"},
+    ))
+
+    assert preview.summary.failed == 1
+    assert preview.items[0].selected_actress is None
+    assert calls == []
+
+
+def test_manual_preview_fails_when_there_is_no_trusted_actress(manual_workspace):
+    plugin, workspace, _, target, source, calls = manual_workspace
+    plugin._actress_subfolder = True
+    plugin.actress_evidence = lambda _media, _number: ([], [])
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="manko",
+        actress_subfolder=True,
+    ))
+
+    assert preview.summary.failed == 1
+    assert preview.items[0].needs_actress_choice is False
+    assert calls == []
+
+
 def test_manual_preview_accepts_user_selected_local_paths_outside_automatic_roots(manual_workspace, tmp_path):
     plugin, workspace, _, _, _, calls = manual_workspace
     source_root = tmp_path / "picked-source"

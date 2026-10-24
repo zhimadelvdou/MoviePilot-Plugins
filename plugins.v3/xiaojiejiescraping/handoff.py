@@ -209,7 +209,7 @@ class HandoffCoordinator:
             actress_identity = None
             if self.config.actress_subfolder:
                 evidence, allowed = self.actress_evidence(media, None) if self.actress_evidence else (None, [])
-                if evidence is None or len(evidence) != 1 or allowed != evidence:
+                if not evidence or allowed != evidence:
                     return self._finish(key, "failed", "primary_actress_choice_required")
                 actress_name = evidence[0]
                 child = child_directory(target, actress_name)

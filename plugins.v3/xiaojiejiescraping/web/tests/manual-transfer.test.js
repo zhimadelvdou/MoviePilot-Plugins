@@ -103,6 +103,33 @@ describe('manual transfer page', () => {
     }))
   })
 
+  it('shows the default trusted actress, clears confirmation on change, and previews the explicit choice', async () => {
+    const { api, wrapper } = setup({ optionsValue: { ...options, actress_subfolder: true } })
+    const selectedPreview = { ...goodPreview, items: [{ ...goodPreview.items[0],
+      needs_actress_choice: true, actor_candidates: ['女優甲', '女優乙'], selected_actress: '女優甲' }] }
+    api.post.mockImplementation(async url => url.endsWith('/preview') ? selectedPreview
+      : ({ state: 'completed', items: [], summary: {} }))
+    await flushPromises()
+    await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
+    await selectValueFromMenu(wrapper, 'media-source', 'Manko')
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+
+    expect(selectComponent(wrapper, 'actress-choice-0').props('modelValue')).toBe('女優甲')
+    await inputFor(wrapper, 'confirm-transfer').setValue(true)
+    expect(wrapper.get('[data-testid="execute"]').attributes('disabled')).toBeUndefined()
+    await selectValue(wrapper, 'actress-choice-0', '女優乙')
+    expect(wrapper.text()).toContain('选择已变更，请重新预览')
+    expect(inputFor(wrapper, 'confirm-transfer').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="execute"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="preview"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenLastCalledWith('plugin/plugin-x/manual/preview', expect.objectContaining({
+      actress_subfolder: true, actress_choices: { '/src/a.mp4': '女優乙' },
+    }))
+  })
+
   it('explains strict source flags and waits without offering ordinary cast when none are trusted', async () => {
     const { api, wrapper } = setup()
     api.post.mockImplementation(async url => url.endsWith('/preview') ? {

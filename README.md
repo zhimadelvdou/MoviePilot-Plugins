@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.8 同番号多原生 ID 查询按 API 返回顺序选取首个完整刮削数据包；不跨 ID 合并标题、简介、图像或演员。若没有完整候选，自动识别拒绝并记录缺少的固定字段标签。正式 MoviePilot V3 SDK 定向回归为 `503 passed, 7 subtests`；0.8.8 已部署生产，73 runtime 文件核验通过，部署清单中 core 有 6 个文件、public 有 1167 个文件；配置与 binding revision 9、3 个下载源及对应媒体、3 份 ledger 和两份 metadata 缓存均保持，自动整理 off、unarmed、queue 0。现场 `GET /media/search` 仅查询 Manko，ADN-765 与 ADN-775 各返回 1 个结果；title、overview、poster、background、日期和 runtime 均完整。搜索前后 ledger/cache/config/media 不变，最终部署审计与备份基线一致。无前端改动，未新增前端测试或 build；本次未做 Chrome 新 UI 验收、preview、transfer 或 scrape。现场证据见[GET smoke](../outputs/manko-scrape-data-selection-20261024/live-search-smoke.log)和[最终审计](../outputs/manko-scrape-data-selection-20261024/final-audit.jsonl)。默认禁用，自动模式默认只读发现。
+这是开发版本。0.8.9 按 Manko 原始演员 packet 顺序默认选取首位可信女主演；手动预览可以选择其他可信候选并重新预览，预览与执行都会复核选择证据。无可信标记或选择不再有效时停止；所有演员继续写入 NFO。自动整理保持默认关闭、默认只读发现。
 
 ## 功能与边界
 
@@ -34,7 +34,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 
 ## 插件独立手动整理
 
-管理员可从插件侧栏打开“Manko 整理”页，从本地文件系统选择源文件或目录、任意独立的既有目标目录，并从已启用来源中选择元数据源。既有自动识别目录仅作为快捷参考，不限制手动选择。页面先展示每个文件的来源身份和原生目标预览；只有有效预览可提交。服务端保存媒体身份、源文件版本、选择范围、目标及 15 分钟有效期，客户端不能替换这些数据。启用“按女主演分目录”后，只使用本次 Manko 原始 packet 中 `avdbs_actor is True` 且与当前识别演员精确匹配的安全姓名；唯一候选自动选用，多位时页面只展示可信候选供明确选择，无可信标记时等待来源数据补齐，不允许从普通 cast 选择。自动整理使用同一证据，无法唯一确定时停止；所有演员仍写入 NFO。
+管理员可从插件侧栏打开“Manko 整理”页，从本地文件系统选择源文件或目录、任意独立的既有目标目录，并从已启用来源中选择元数据源。既有自动识别目录仅作为快捷参考，不限制手动选择。页面先展示每个文件的来源身份和原生目标预览；只有有效预览可提交。服务端保存媒体身份、源文件版本、选择范围、目标及 15 分钟有效期，客户端不能替换这些数据。启用“按女主演分目录”后，只使用本次 Manko 原始 packet 中 `avdbs_actor is True` 且与当前识别演员精确匹配的安全姓名；默认按来源顺序选择第一位，手动页面可改选其他可信候选并重新预览，无可信标记时等待来源数据补齐，不允许从普通 cast 选择。自动整理使用同一证据，默认选择第一位可信候选；执行前若默认首位发生变化或所选演员不再可信则停止。所有演员仍写入 NFO。
 
 首版只允许硬链接、重命名、刮削和不覆盖既有目标；最多扫描 1000 个目录项、50 个视频。实际源/目标必须为独立的本地既有路径，不能选择文件系统根目录；符号链接不参与扫描，父目录可浏览。预览会先检查源和目标在同一卷，否则拒绝硬链接。提交状态可能为“宿主已受理”或“结果不确定”；状态页只有回读确认源文件版本未变、目标为同一 inode 的硬链接后才标记 `completed`，并注明 `completion_scope=file_transfer`。这只证明文件整理，不证明 NFO、图片或刮削已完成；请查看 MoviePilot 原生历史。未知结果不会自动重提。原文件始终保留。
 
@@ -56,7 +56,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 | handoff_mode | discover | discover 只发现；preview 查询并预览；execute 原生整理并刮削 |
 | target_path | 空 | 既有本地目标目录，不允许与输入目录相互包含 |
 | transfer_type | 空 | 必须明确选择 copy 复制或 link 硬链接；无默认搬运方式 |
-| actress_subfolder | false | 在媒体库下按女主演姓名增加一级目录；Manko 当前识别中 `avdbs_actor is True` 的演员为候选，唯一自动选定，多位要求选择，无可信标记则等待 |
+| actress_subfolder | false | 在媒体库下按女主演姓名增加一级目录；Manko 当前识别中 `avdbs_actor is True` 的演员为候选，默认按来源顺序选第一位，手动流程可改选其它可信候选，无可信标记则等待 |
 | ownership_ack | false | 执行前确认相同来源已排除在宿主原生自动监控之外 |
 | auxiliary_ack | false | 执行前确认理解原生 TMDB 辅助补充风险并核对预览 |
 | handoff_limit | 1 | 每轮最多准备/处理的新文件数，范围 1–5 |
@@ -146,6 +146,10 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 示例：`Xiaojiejie-Scraping diagnostic source=manko operation=search reason=http_error http_status=403`。每行仅包含固定词表和有限整数，不包含番号、原生 ID、搜索词、完整 URL/参数、代理地址、请求头、Cookie、响应正文、异常文本、标题或文件路径。SDK 未提供状态时省略该字段；诊断不增加请求或自动重试、不改变匹配与访问边界，也不绕过访问门槛。并发查询应结合日志时间和阶段阅读，不能把其它查询的相邻行当成同一个请求的证据。
 
 ## 测试、版本与许可
+
+0.8.9 多位可信女主演时，自动整理与手动预览默认按原始来源顺序选择第一位。手动页面允许改选可信候选，变更选择会使旧预览和确认失效，必须重新预览；执行前再次核验默认候选仍为首位，手动候选仍有本次原始 `avdbs_actor is True` 标记且匹配当前 cast。无可信证据、非法选择或证据变化均失败关闭；NFO 继续写入完整演员 cast。官方 MoviePilot V3 SDK 全组为 1552 passed、44 failed（7 subtests）；44 个失败均位于未修改的 `test_javrecognize_provider.py`，与 0.8.8 基线失败集合完全一致，且该 provider 与其测试文件未变。Vue 组件测试 45/45 通过，isolated production build 成功；runtime dist 增加 4 个带 hash 资产并更新 index 与 remoteEntry，保留旧 hash 资产。
+
+2026-10-24 Chrome 现场 preview：SONE-288 默认选角为葵司，结果 `1 success / 0 failed`，目标为 `/media/Link/AV/葵司/SONE-288 (2024)/SONE-288(2024).mp4`；手动改选坂道美琉后页面提示重新预览且禁用确认，重新 preview 同样 `1 success / 0 failed`，目标为 `/media/Link/AV/坂道美琉/SONE-288 (2024)/SONE-288(2024).mp4`。未确认或执行，未发生 transfer/scrape；源文件 stat 前后精确相同、`nlink=1`，且未创建目标目录。0.8.9 已部署，77 个 runtime 文件；部署审计保护项通过。preview 后审计中 core、public、config、binding、media 保持不变，ledger/cache 变化符合预览与 GET 的预期。前两次来源请求返回 `transport_unavailable`，随后相同配置连通，GET 和两次预览成功；具体网络原因未定位。现场材料：[默认预览](../outputs/manko-default-first-actress-20261024/sone288-default-first.jpg)、[手动改选预览](../outputs/manko-default-first-actress-20261024/sone288-manual-second.jpg)、[结果证明](../outputs/manko-default-first-actress-20261024/sone288-preview-result.jpg)、[preview 后审计](../outputs/manko-default-first-actress-20261024/previewed-audit.log)。真实新下载自动全流程仍未验收。
 
 0.8.7 按本次识别的 Manko packet `actors[*].avdbs_actor is True` 选择女主演；数值 1、字符串 `true`、false 或缺失均不满足。可信候选仅用于目录选择，NFO 保留完整演员列表。执行时自动选择须仍为唯一候选；手动选择须仍匹配且保持 true 标记，不相关候选变化不会使其失效。验证：官方 MoviePilot V3 SDK 定向测试 `372 passed, 7 subtests`；前端测试 `44/44`，production build 成功。候选 1 的 6 个失败是 SDK `MediaInfo.to_dict()` 暴露动态私有属性；候选 2 改用插件内弱引用证据映射后全组通过。新版页面现场 ABF-382 自动选角预览为 1 success/0 failed，未执行整理；ADN-765 预览在既有来源身份候选歧义处停止，未进入女主演规则判定。部署审计摘要及证据链接见上文。
 

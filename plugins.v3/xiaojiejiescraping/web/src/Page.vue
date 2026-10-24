@@ -12,6 +12,7 @@ const mediaSource = ref('')
 const actressSubfolder = ref(false)
 const actressChoices = ref({})
 const preview = ref(null)
+const previewNeedsRefresh = ref(false)
 const confirmed = ref(false)
 const busy = ref(false)
 const previewBusy = ref(false)
@@ -98,7 +99,7 @@ const sortedBrowseItems = computed(() => {
 const previewExpired = computed(() => !preview.value || !Number.isFinite(previewExpiryMs.value) || previewExpiryMs.value <= now.value)
 const executionLocked = computed(() => outcome.value === 'pendingaccepted' || outcome.value === 'unknown')
 const formLocked = computed(() => busy.value || executionLocked.value)
-const canExecute = computed(() => !!preview.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && confirmed.value && !busy.value && !previewBusy.value && outcome.value === '')
+const canExecute = computed(() => !!preview.value && !previewNeedsRefresh.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && confirmed.value && !busy.value && !previewBusy.value && outcome.value === '')
 const endpoint = (name) => `plugin/${props.pluginId}/manual/${name}`
 const automaticEndpoint = (name) => `plugin/${props.pluginId}/automatic/${name}`
 const pluginConfigEndpoint = () => `plugin/${props.pluginId}`
@@ -145,6 +146,7 @@ function invalidatePreview() {
   if (formLocked.value) return
   requestGeneration += 1
   preview.value = null
+  previewNeedsRefresh.value = false
   confirmed.value = false
   outcome.value = ''
   clearPendingPreview()
@@ -167,6 +169,16 @@ function setActressSubfolder(value) {
   actressSubfolder.value = value === true
   invalidatePreview()
   actressChoices.value = {}
+}
+function setActressChoice(path, value) {
+  if (formLocked.value) return
+  requestGeneration += 1
+  actressChoices.value = { ...actressChoices.value, [path]: value }
+  previewNeedsRefresh.value = true
+  confirmed.value = false
+  outcome.value = ''
+  clearPendingPreview()
+  error.value = ''
 }
 function executionOutcome(state) {
   if (state === 'completed') return 'completed'
@@ -263,6 +275,7 @@ async function createPreview() {
     const result = await props.api.post(endpoint('preview'), { ...snapshot, transfer_type: 'link', library_category_folder: false })
     if (requestGeneration === generation && snapshot.path === sourcePath.value && snapshot.target_path === targetPath.value && snapshot.media_source === mediaSource.value && !formLocked.value) {
       preview.value = result
+      previewNeedsRefresh.value = false
       confirmed.value = false
     }
   } catch {
@@ -494,15 +507,15 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <VCol cols="12" md="6"><VTextField data-testid="target-path" label="目标媒体库目录" placeholder="/library/..." :model-value="targetPath" :disabled="formLocked" @update:model-value="setPath('target',$event)"><template #append><VBtn data-testid="browse-target" variant="tonal" :disabled="formLocked" @click="openBrowser('target')">浏览</VBtn></template></VTextField></VCol>
         <VCol cols="12"><p class="text-body-2">路径使用 MoviePilot 文件管理中可见的本地路径。整理方式为硬链接，要求来源与目标在同一文件系统；条件不满足时会显示错误，不会改为复制。目标影片目录会交给 MoviePilot 完成后续刮削。</p></VCol>
         <VCol cols="12" md="6"><VSelect data-testid="media-source" label="识别来源" :items="options?.sources || []" item-title="title" item-value="value" :model-value="mediaSource" :disabled="formLocked" @update:model-value="setMediaSource" /></VCol>
-        <VCol cols="12"><VSwitch data-testid="actress-subfolder" label="按女主演分目录" color="primary" hide-details :model-value="actressSubfolder" :disabled="formLocked" @update:model-value="setActressSubfolder" /><p class="text-body-2 mt-1">仅本次来源识别中标记 avdbs_actor=true 的演员可作为女主演；唯一候选自动使用，多位时请从可信候选选择。没有可信标记时需等待来源数据补齐，不可从其他演员中选择。</p></VCol>
+        <VCol cols="12"><VSwitch data-testid="actress-subfolder" label="按女主演分目录" color="primary" hide-details :model-value="actressSubfolder" :disabled="formLocked" @update:model-value="setActressSubfolder" /><p class="text-body-2 mt-1">仅本次来源识别中标记 avdbs_actor=true 的演员可作为女主演；默认使用来源顺序第一位，也可在预览中选择其他可信候选并重新预览。没有可信标记时需等待来源数据补齐，不可从其他演员中选择。</p></VCol>
       </VRow>
       <div class="d-flex flex-wrap align-center justify-space-between ga-3"><VChip variant="tonal">整理方式：硬链接（保留来源文件）</VChip><VBtn data-testid="preview" color="primary" :loading="previewBusy" :disabled="previewBusy || formLocked || !options?.enabled || !sourcePath || !targetPath || !mediaSource" @click="createPreview">识别并预览</VBtn></div>
     </VCardText></VCard>
     <VCard v-if="preview" class="mb-4" variant="outlined">
-      <VCardTitle class="d-flex flex-wrap justify-space-between ga-3"><span>预览结果</span><VChip :color="previewExpired ? 'error' : 'success'" variant="tonal">{{ previewExpired ? '预览已过期' : `有效至 ${new Date(previewExpiryMs).toLocaleString()}` }}</VChip></VCardTitle>
+          <VCardTitle class="d-flex flex-wrap justify-space-between ga-3"><span>预览结果</span><VChip :color="previewExpired || previewNeedsRefresh ? 'error' : 'success'" variant="tonal">{{ previewNeedsRefresh ? '选择已变更，请重新预览' : previewExpired ? '预览已过期' : `有效至 ${new Date(previewExpiryMs).toLocaleString()}` }}</VChip></VCardTitle>
       <VCardText><p>{{ preview.summary?.success || 0 }} 项可整理，{{ preview.summary?.failed || 0 }} 项失败</p>
-        <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}<VSelect v-if="item.needs_actress_choice" :data-testid="`actress-choice-${index}`" class="mt-2" density="compact" label="演员候选（选择女主演）" :items="item.actor_candidates || []" :model-value="actressChoices[item.source] || null" :disabled="formLocked" @update:model-value="actressChoices[item.source] = $event" /></td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target || '—' }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
-        <VCheckbox data-testid="confirm-transfer" :model-value="confirmed" label="我已核对预览，并确认按上述硬链接路径整理。" :disabled="!preview || previewExpired || formLocked" @update:model-value="confirmed = $event" />
+        <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}<VSelect v-if="item.needs_actress_choice" :data-testid="`actress-choice-${index}`" class="mt-2" density="compact" label="演员候选（选择女主演）" :items="item.actor_candidates || []" :model-value="actressChoices[item.source] || item.selected_actress || null" :disabled="formLocked" @update:model-value="setActressChoice(item.source, $event)" /></td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target || '—' }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
+        <VCheckbox data-testid="confirm-transfer" :model-value="confirmed" label="我已核对预览，并确认按上述硬链接路径整理。" :disabled="!preview || previewNeedsRefresh || previewExpired || formLocked" @update:model-value="confirmed = $event" />
         <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="execute" color="primary" :disabled="!canExecute" :loading="busy && outcome === 'pendingaccepted'" @click="execute">确认并整理</VBtn><VBtn v-if="outcome" data-testid="refresh-status" variant="tonal" :disabled="busy" :loading="busy" @click="refreshStatus">只读刷新状态</VBtn></div>
         <VAlert v-if="outcome === 'pendingaccepted'" class="mt-3" type="info" variant="tonal">请求已受理，正在等待结果。</VAlert><VAlert v-else-if="outcome === 'completed'" class="mt-3" type="success" variant="tonal">硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史</VAlert><VAlert v-else-if="outcome === 'failed'" class="mt-3" type="error" variant="tonal">整理失败，原任务已结束。</VAlert><VAlert v-else-if="outcome === 'unknown'" class="mt-3" type="error" variant="tonal">结果未知，不能重复提交。</VAlert>
         <p v-if="preview.execution" class="text-body-2">任务 {{ preview.execution.state }}：{{ preview.execution.summary?.success || 0 }} 项成功，{{ preview.execution.summary?.failed || 0 }} 项失败</p>

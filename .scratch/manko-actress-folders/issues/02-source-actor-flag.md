@@ -6,11 +6,11 @@ Type: task
 ## 验收标准
 
 - 仅本次识别 Manko packet `actors` 中 `avdbs_actor is True` 的安全姓名，且须精确属于当前 MediaInfo 演员集合；整数 1、字符串 `true`、false、空值均不算。
-- 唯一候选自动选择；多个候选只提供这些演员供人工选择；无候选时等待可信标记，不允许从 cast 旁路选择。
+- 自动整理与手动预览默认按来源顺序选择首位可信候选；手动流程可选择其他可信候选并重新预览；无候选时等待可信标记，不允许从 cast 旁路选择。
 - 手动预览、执行重核和 qBittorrent 自动整理共用此证据。证据仅绑定本次识别的来源、MediaInfo ID 和番号，不作为公开 MediaInfo/NFO 字段持久化。
 - 执行时若选择演员不再有当前可信标记，旧预览必须 fail closed；缓存识别不能以旧证据替代本次 packet。
 - 所有 cast 仍写入 NFO；其它来源既有行为、路径选择、整理方式和 `actress_subfolder` 开关保持不变。
-- README、版本 0.8.7、dist 和相关规格/票据同步更新。
+- README、版本 0.8.9、dist 和相关规格/票据同步更新。
 
 ## Progress
 

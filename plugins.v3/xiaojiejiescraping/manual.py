@@ -428,19 +428,18 @@ class ManualTransferWorkspace:
             candidates = []
             if actress_subfolder:
                 trusted_names, allowed_trusted = self.plugin.actress_evidence(media, number)
-                names_in_media = actor_names(media)
-                candidates = allowed_trusted if trusted_names is not None else names_in_media
+                candidates = allowed_trusted if trusted_names is not None else actor_names(media)
                 requested_actress = request.actress_choices.get(str(path))
-                if requested_actress is not None and requested_actress in candidates:
-                    selected_actress = requested_actress
-                    actress_choice_mode = "manual"
-                elif (trusted_names is not None and len(trusted_names) == 1
-                      and allowed_trusted == trusted_names):
+                if requested_actress is not None:
+                    if requested_actress in candidates:
+                        selected_actress = requested_actress
+                        actress_choice_mode = "manual"
+                elif (trusted_names and allowed_trusted == trusted_names):
                     selected_actress = trusted_names[0]
-                    actress_choice_mode = "source_flag_unique"
+                    actress_choice_mode = "source_flag_first"
                 if selected_actress is None:
                     message = ("本次来源识别没有 avdbs_actor=true 的可信女主演标记；等待可信标记后重试"
-                               if trusted_names == [] else "请从本片可信女主演候选中选择后重新预览")
+                               if not trusted_names else "请从本片可信女主演候选中选择后重新预览")
                     items.append(ManualPreviewItem(
                         source=str(path), title=self._value(media, "title"),
                         media_source=request.media_source, media_id=str(media.media_id),
@@ -474,6 +473,7 @@ class ManualTransferWorkspace:
                 title=self._value(media, "title"), media_source=request.media_source,
                 media_id=str(media.media_id), poster_path=self._value(media, "poster_path"),
                 success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标",
+                needs_actress_choice=bool(actress_subfolder and len(candidates) > 1),
                 selected_actress=selected_actress, actor_candidates=candidates))
             if ok:
                 intents.append({"source": str(path), "target": str(destination),
@@ -631,8 +631,13 @@ class ManualTransferWorkspace:
                     effective_target = Path(intent.get("actress_root") or target)
                     if intent.get("actress_subfolder"):
                         trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
-                        if intent.get("actress_choice_mode") == "source_flag_unique":
+                        choice_mode = intent.get("actress_choice_mode")
+                        if choice_mode == "source_flag_unique":
                             valid_name = (trusted_names is not None and len(trusted_names) == 1
+                                          and allowed == trusted_names
+                                          and trusted_names[0] == intent.get("actress_name"))
+                        elif choice_mode == "source_flag_first":
+                            valid_name = (trusted_names is not None and bool(trusted_names)
                                           and allowed == trusted_names
                                           and trusted_names[0] == intent.get("actress_name"))
                         else:
@@ -709,8 +714,13 @@ class ManualTransferWorkspace:
                 effective_target = Path(intent.get("actress_root") or target)
                 if intent.get("actress_subfolder"):
                     trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
-                    if intent.get("actress_choice_mode") == "source_flag_unique":
+                    choice_mode = intent.get("actress_choice_mode")
+                    if choice_mode == "source_flag_unique":
                         valid_name = (trusted_names is not None and len(trusted_names) == 1
+                                      and allowed == trusted_names
+                                      and trusted_names[0] == intent.get("actress_name"))
+                    elif choice_mode == "source_flag_first":
+                        valid_name = (trusted_names is not None and bool(trusted_names)
                                       and allowed == trusted_names
                                       and trusted_names[0] == intent.get("actress_name"))
                     else:

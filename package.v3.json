@@ -3,7 +3,7 @@
     "name": "Xiaojiejie-Scraping",
     "description": "直连多来源刮削：插件独立手动整理页、qBittorrent 标签/目录触发、预览与安全持久原生交接",
     "labels": "识别,刮削",
-    "version": "0.8.8",
+    "version": "0.8.9",
     "icon": "",
     "author": "zhimadelvdou（基于 hyuan280 方案重写）",
     "level": 1,
@@ -11,6 +11,7 @@
     "release": true,
     "system_version": ">=3.1.1,<4",
     "history": {
+      "v0.8.9": "按来源顺序默认选择首位可信女主演；手动预览可改选可信候选并在预览与执行时持续复核",
       "v0.8.8": "同番号多原生 ID 按 API 顺序选择首个完整刮削数据包，不跨记录合并；无完整包时记录缺项并拒绝",
       "v0.8.7": "按本次 Manko 原始演员 packet 的 avdbs_actor=true 标记确定女主演；无可信标记时等待，多候选限可信演员",
       "v0.8.6": "手动目录浏览增加名称、修改时间、文件大小排序；文件夹始终优先，元数据缺失可兼容",

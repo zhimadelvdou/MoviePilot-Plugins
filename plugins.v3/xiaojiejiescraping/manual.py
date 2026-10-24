@@ -20,6 +20,7 @@ from .discovery import VIDEO_EXTENSIONS
 from .handoff import native_transfer, _fingerprint, _target_path
 from .ledger import HandoffLedger, task_key
 from .layout import actor_names, child_directory, child_directory_matches, safe_component
+from .diagnostics import capture_query_diagnostics
 
 MAX_SCAN_ENTRIES = 1000
 MAX_VIDEO_FILES = 50
@@ -413,13 +414,29 @@ class ManualTransferWorkspace:
                 items.append(ManualPreviewItem(source=str(path), success=False,
                                                message="源文件与目标目录不在同一卷，无法创建硬链接"))
                 continue
-            media = self.plugin.recognize_media(meta=self._meta(path, number), mtype=MediaType.MOVIE,
-                                                media_source=request.media_source,
-                                                cache=not actress_subfolder)
+            with capture_query_diagnostics() as query_events:
+                media = self.plugin.recognize_media(meta=self._meta(path, number), mtype=MediaType.MOVIE,
+                                                    media_source=request.media_source,
+                                                    cache=not actress_subfolder)
             if (not media or str(self._value(media, "media_source")) != request.media_source
                     or not self._value(media, "media_id")):
-                items.append(ManualPreviewItem(source=str(path), success=False,
-                                               message="所选来源未能确认唯一媒体身份"))
+                message = "所选来源未能确认唯一媒体身份"
+                messages = {
+                    "access_verification_required": "JavBus 返回访问验证页面，当前无法匿名识别",
+                    "rate_limited": "JavBus 限流（HTTP 429），请稍后重试",
+                    "login_required": "JavBus 页面要求登录；当前接入不使用账号登录",
+                    "not_found": "JavBus 未找到该番号（HTTP 404）",
+                    "network_unavailable": "JavBus 请求未获得响应，请稍后重试",
+                    "upstream_unavailable": "JavBus 暂时不可用",
+                    "access_restricted": "JavBus 当前访问受限",
+                    "response_invalid": "JavBus 返回的页面无法确认媒体身份",
+                }
+                cause = next((reason for source, operation, reason, _ in query_events
+                              if source == request.media_source and operation == "search"
+                              and reason in messages), None)
+                if cause:
+                    message = messages[cause]
+                items.append(ManualPreviewItem(source=str(path), success=False, message=message))
                 continue
             selected_actress = None
             actress_choice_mode = None

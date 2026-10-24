@@ -1,8 +1,24 @@
 """查询诊断只输出固定词表和有限整数，绝不记录用户输入或上游文本。"""
 # SPDX-License-Identifier: GPL-3.0-only
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from app.sdk.logging import logger
 
 from .registry import PROVIDERS
+
+_query_events = ContextVar("xiaojiejiescraping_query_events", default=None)
+
+
+@contextmanager
+def capture_query_diagnostics():
+    """Capture a bounded, sanitized diagnostic slice for one caller context."""
+    events = []
+    token = _query_events.set(events)
+    try:
+        yield events
+    finally:
+        _query_events.reset(token)
 
 _SOURCES = frozenset(status.key for status in PROVIDERS) | {"plugin", "other"}
 _OPERATIONS = frozenset({"configure", "request", "search", "fetch", "detail", "actors", "accept"})
@@ -15,7 +31,9 @@ _REASONS = frozenset({
     "http_redirect", "invalid_json", "payload_invalid", "schema_invalid",
     "search_incomplete", "no_candidates", "candidates", "no_exact_match",
     "ambiguous_match", "exact_match", "equivalent_match", "metadata_incomplete",
-    "number_evidence_invalid", "actors_invalid",
+    "number_evidence_invalid", "actors_invalid", "access_verification_required",
+    "rate_limited", "login_required", "not_found", "network_unavailable",
+    "upstream_unavailable", "access_restricted", "response_invalid",
 })
 _MISSING_FIELDS = ("title", "descriptions", "date", "cover", "background", "actors")
 
@@ -38,6 +56,9 @@ def diagnose(source, operation, reason, *, status=None, count=None, fields=None)
         missing = [field for field in _MISSING_FIELDS if field in fields]
         if missing:
             message += " missing=" + ",".join(missing)
+    events = _query_events.get()
+    if isinstance(events, list) and len(events) < 16:
+        events.append((source, operation, reason, status if type(status) is int and 100 <= status <= 599 else None))
     try:
         logger.info(message)
     except Exception:

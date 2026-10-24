@@ -22,11 +22,14 @@ import re
 from urllib.parse import urljoin, urlsplit
 
 from lxml import etree
+import httpx
+import requests
 
 from app.sdk.config import settings
 from .transport import AnonymousAsyncRequestUtils as AsyncRequestUtils, AnonymousRequestUtils as RequestUtils
 
 from .core import IDENTIFIER, clean_text, normalize_number, record_numbers
+from .diagnostics import diagnose
 
 
 MAX_HTML = 2_000_000
@@ -192,6 +195,78 @@ class JavBusProvider(_HtmlProvider):
     source = "javbus"
     base = "https://www.javbus.com"
 
+    def _location_kind(self, location: str) -> str:
+        try:
+            target = urlsplit(urljoin(self.base + "/", location))
+            origin = urlsplit(self.base)
+            if (target.scheme != "https" or target.netloc != origin.netloc
+                    or target.username or target.password):
+                return ""
+            path = target.path.lower()
+        except (TypeError, ValueError):
+            return ""
+        if any(token in path for token in ("driver-verify", "captcha", "verify", "verification")):
+            return "access_verification_required"
+        if path.rstrip("/") in ("/login", "/signin", "/sign-in"):
+            return "login_required"
+        return ""
+
+    @staticmethod
+    def _body_kind(text: str) -> str:
+        html = _document(text)
+        if html is None:
+            return ""
+        # A details page may contain modal login controls or challenge scripts;
+        # only classify a page when the normal JavBus identity/title structure is absent.
+        has_details = bool(html.xpath(
+            "//div[contains(concat(' ',normalize-space(@class),' '),' info ')]"
+            "/p/span[normalize-space(.)='識別碼:']/following-sibling::span[1]"
+        ) and html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' container ')]/h3"))
+        if has_details:
+            return ""
+        titles = [value.strip().lower() for value in html.xpath("//title/text() | //h1/text()")]
+        if any(value in ("login", "sign in", "ログイン", "登入") for value in titles):
+            return "login_required"
+        if html.xpath("//form[@id='login' or @name='login' or contains(@action, '/login')]"
+                      " | //form[.//input[@type='password']]"):
+            return "login_required"
+        if html.xpath("//*[contains(concat(' ',normalize-space(@id),' '),' driver-verify ')"
+                      " or contains(concat(' ',normalize-space(@class),' '),' driver-verify ')"
+                      " or contains(concat(' ',normalize-space(@id),' '),' captcha ')"
+                      " or contains(concat(' ',normalize-space(@class),' '),' captcha ')]"):
+            return "access_verification_required"
+        if any(value in ("verification", "security verification", "captcha", "人机验证", "验证码")
+               for value in titles):
+            return "access_verification_required"
+        return ""
+
+    def _response(self, response):
+        status, location, text = super()._response(response)
+        reason = ""
+        if response is None:
+            reason = "network_unavailable"
+        elif status == 429:
+            reason = "rate_limited"
+        elif status == 404:
+            reason = "not_found"
+        elif status in (401,):
+            reason = "login_required"
+        elif status == 403:
+            reason = "access_restricted"
+        elif status >= 500:
+            reason = "upstream_unavailable"
+        elif status in (301, 302, 303, 307, 308):
+            reason = self._location_kind(location)
+            if not reason and not self._safe_detail_url(location):
+                reason = "access_restricted"
+        elif status == 200:
+            reason = self._body_kind(text)
+        elif status:
+            reason = "access_restricted"
+        if reason:
+            diagnose(self.source, "search", reason, status=status or None)
+        return status, location, text
+
     def _detail_path(self, path: str) -> bool:
         return bool(re.fullmatch(r"/[A-Za-z0-9_-]{1,128}/?", path)
                     and normalize_number(path.strip("/")))
@@ -207,17 +282,42 @@ class JavBusProvider(_HtmlProvider):
         title = _single(html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' container ')]/h3"))
         released = _field(html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' info ')]"
                                     "/p/span[normalize-space(.)='發行日期:']"))
-        actors = html.xpath("//a[contains(concat(' ',normalize-space(@class),' '),' avatar-box ')]/div/img/@title")
+        # Keep both JavBus cast layouts in document order. These names never
+        # become trusted actress evidence.
+        actors = html.xpath(
+            "//a[contains(concat(' ',normalize-space(@class),' '),' avatar-box ')]/div/img/@title | "
+            "//div[contains(concat(' ',normalize-space(@class),' '),' star-name ')]//a[@title]/@title"
+        )
         cover = _single(html.xpath("//a[contains(concat(' ',normalize-space(@class),' '),' bigImage ')]/img/@src"))
         return _packet(self.source, number, number, title, actors=actors, released=released, cover=cover, base=self.base)
 
     def search(self, number: str) -> dict | None:
         number = normalize_number(number)
-        return self._parse(self._load("/" + number)[0], number) if number else None
+        if not number:
+            return None
+        try:
+            html = self._load("/" + number)[0]
+        except requests.exceptions.RequestException:
+            diagnose(self.source, "search", "network_unavailable")
+            return None
+        result = self._parse(html, number)
+        if not result:
+            diagnose(self.source, "search", "response_invalid")
+        return result
 
     async def async_search(self, number: str) -> dict | None:
         number = normalize_number(number)
-        return self._parse((await self._aload("/" + number))[0], number) if number else None
+        if not number:
+            return None
+        try:
+            html = (await self._aload("/" + number))[0]
+        except httpx.RequestError:
+            diagnose(self.source, "search", "network_unavailable")
+            return None
+        result = self._parse(html, number)
+        if not result:
+            diagnose(self.source, "search", "response_invalid")
+        return result
 
     def fetch(self, identity: str) -> dict | None:
         return self.search(identity) if normalize_number(identity) == identity else None

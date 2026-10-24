@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.9 按 Manko 原始演员 packet 顺序默认选取首位可信女主演；手动预览可以选择其他可信候选并重新预览，预览与执行都会复核选择证据。无可信标记或选择不再有效时停止；所有演员继续写入 NFO。自动整理保持默认关闭、默认只读发现。
+这是开发版本。0.8.10 增加可选 JavBus 匿名识别；默认来源仍只有 Manko，须在来源配置中显式保存 JavBus 后才会参与手动及自动识别。JavBus 演员不提供可信女优证据，限流/访问验证时仅显示固定安全提示；该来源尚未实站验收。0.8.9 按 Manko 原始演员 packet 顺序默认选取首位可信女主演；手动预览可以选择其他可信候选并重新预览，预览与执行都会复核选择证据。无可信标记或选择不再有效时停止；所有演员继续写入 NFO。自动整理保持默认关闭、默认只读发现。
 
 ## 功能与边界
 
@@ -25,7 +25,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 | MGStage | 原生产品 URL/品番详情；保留数字前缀；遇年龄门槛不设置确认 Cookie |
 | DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
 | SOD | 产品详情表；不执行年龄/会话握手 |
-| JavBus/Jav321 | 公开软件记录的详情身份与番号字段，严格核对来源原生 ID |
+| JavBus/Jav321 | JavBus 仅匿名请求、严格核对详情番号；访问验证/429会安全提示，未实站验收 |
 | FC2Hub | `id{number}` permalink 及经搜索确认的当前详情路由；不猜新版 slug |
 | FC2PPVDB / FC2CMADB | 匿名普通 GET `/articles/{video_id}` 的初始 Inertia `Articles/Show` 合同；核对页面路径和 video_id，不把 article.id 当产品 ID；不请求有访问争议的延迟演员接口 |
 | GFriends | 官方 `Filetree.json`：演员名精确匹配、按质量顺序选图；只取公开索引 |
@@ -45,7 +45,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 | 设置 | 默认 | 含义 |
 | --- | --- | --- |
 | enabled | false | 启用插件能力；初始化不联网 |
-| sources | Manko | 多选元数据来源，选择顺序即自动查询顺序 |
+| sources | Manko | 多选元数据来源，选择顺序即自动查询顺序；JavBus 需显式保存启用 |
 | storage | local | 当前只支持本地挂载文件，暂不接受远程存储 |
 | recognize_dirs | 空 | 每行一个 MoviePilot 容器内绝对输入目录，含子目录 |
 | automatic_match_mode | 新配置默认 tag_or_path；旧配置缺省 tag_and_path | 自动匹配来源：tag、path、tag_or_path 或 tag_and_path。OR 模式至少需标签或路径之一；tag-only 从宿主映射的任务路径建立本次范围 |
@@ -111,7 +111,7 @@ Manko 的同步/异步搜索与手动候选接口遵循相同规则：先证明�
 
 V3.1.8 原生文件管理整理窗口选择“电影”后会显示媒体 ID 控件；空 ID 的原生窗口仍依赖既有 MoviePilot 热修才能按来源自动识别，手动填入已知 Manko ID 可按原生流程预览。插件侧栏的独立“Manko 整理”页直接从文件名/允许的父目录提取番号、按明确选择的来源识别并固定身份，不依赖该原生窗口热修。两条入口分开验收；独立页预览成功也不代表硬链接或 NFO/图片已写盘。工作流验收规格见 [Manko 原生识别与整理规格](.scratch/manko-native-workflow/spec.md)。
 
-Manko 的 `cover_image` 映射为 poster。`backdrop_images` 按来源顺序最多检查 8 个通过 `image_hosts` 精确 HTTPS 主机校验、且不与封面重复的候选；插件匿名读取最多 256 KiB 图片头，选取首个宽高至少 320×180、横向且边长不超过 8192、像素数不超过 4000 万的背景图。没有合格背景图时只返回 poster，不会把封面重复用作背景图。该设置默认空，空值不会提供图像地址。URL 通过插件校验只表示允许交给宿主，不保证 MoviePilot 下载或落盘成功。有效正整数 `video_duration` 映射为分钟。对于精确 `ADN-数字` 番号，插件还会请求固定的 ATTACKERS 官方详情页，仅在品番字段完整匹配时补入缺失导演、ATTACKERS 片商标记和官方分钟时长；页面不可用或结构不匹配不会影响 Manko 身份识别。官方时长只补缺失字段，不覆盖 Manko 数据，也不改写原文件已有 NFO；`tags`、`imdb_score` 和 `rating` 尚未映射。
+Manko 的 `cover_image` 映射为 poster。`backdrop_images` 按来源顺序最多检查 8 个通过 `image_hosts` 精确 HTTPS 主机校验、且不与封面重复的候选；插件匿名读取最多 256 KiB 图片头，选取首个宽高至少 320×180、横向且边长不超过 8192、像素数不超过 4000 万的背景图。没有合格背景图时只返回 poster，不会把封面重复用作背景图。该设置默认空，空值不会提供图像地址。JavBus 封面也必须由用户将实际封面 URL 的精确主机加入 `image_hosts` 才会交给宿主；空值时无海报。URL 通过插件校验只表示允许交给宿主，不保证 MoviePilot 下载或落盘成功。有效正整数 `video_duration` 映射为分钟。对于精确 `ADN-数字` 番号，插件还会请求固定的 ATTACKERS 官方详情页，仅在品番字段完整匹配时补入缺失导演、ATTACKERS 片商标记和官方分钟时长；页面不可用或结构不匹配不会影响 Manko 身份识别。官方时长只补缺失字段，不覆盖 Manko 数据，也不改写原文件已有 NFO；`tags`、`imdb_score` 和 `rating` 尚未映射。
 
 ## 宿主 TMDB 辅助补充限制
 
@@ -146,6 +146,8 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 示例：`Xiaojiejie-Scraping diagnostic source=manko operation=search reason=http_error http_status=403`。每行仅包含固定词表和有限整数，不包含番号、原生 ID、搜索词、完整 URL/参数、代理地址、请求头、Cookie、响应正文、异常文本、标题或文件路径。SDK 未提供状态时省略该字段；诊断不增加请求或自动重试、不改变匹配与访问边界，也不绕过访问门槛。并发查询应结合日志时间和阶段阅读，不能把其它查询的相邻行当成同一个请求的证据。
 
 ## 测试、版本与许可
+
+0.8.10 增加 JavBus 匿名可选元数据来源，默认来源保持 Manko；保存 JavBus 到现有 `sources` 后才参与手动和自动识别。适配器严格核对请求番号和详情身份，兼容两类演员标记但不产生可信女优证据；driver-verify/访问验证、429、登录跳转、404 与网络异常会写入固定词表诊断并向手动预览显示安全提示，不记录上游正文或 URL。JavBus 海报须由用户将实际图片 URL 的精确主机加入 `image_hosts`，默认空值无海报。验证：network-none 隔离 SDK 定向回归 `504 passed`；完整 22 个测试文件 `1558 passed, 44 failed, 8 warnings, 7 subtests passed`。44 个失败的完整 nodeid 集合与 0.8.9 基线相同（SHA-256 `48bbe2a2b6dde3b87fe1067a3378374813917b391ed310e5325c23e6e9514b51`），无新增/缺失；8 条警告是既有 `test_handoff_ledger` 多线程 fork 弃用警告。当前仅代码及合成回归验收；实站只读仍遇 driver-verify/HTTP 429，未取得正常元数据，未部署，FANZA 仍搁置。测试日志和候选快照见 [JavBus 匿名接入验证记录](../outputs/javbus-anonymous-20261025/README.md)。
 
 0.8.9 多位可信女主演时，自动整理与手动预览默认按原始来源顺序选择第一位。手动页面允许改选可信候选，变更选择会使旧预览和确认失效，必须重新预览；执行前再次核验默认候选仍为首位，手动候选仍有本次原始 `avdbs_actor is True` 标记且匹配当前 cast。无可信证据、非法选择或证据变化均失败关闭；NFO 继续写入完整演员 cast。官方 MoviePilot V3 SDK 全组为 1552 passed、44 failed（7 subtests）；44 个失败均位于未修改的 `test_javrecognize_provider.py`，与 0.8.8 基线失败集合完全一致，且该 provider 与其测试文件未变。Vue 组件测试 45/45 通过，isolated production build 成功；runtime dist 增加 4 个带 hash 资产并更新 index 与 remoteEntry，保留旧 hash 资产。
 

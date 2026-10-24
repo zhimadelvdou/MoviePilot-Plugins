@@ -24,7 +24,7 @@ const browsePurpose = ref('manual')
 const browsePath = ref('')
 const parentPath = ref('')
 const browseItems = ref([])
-const browseSort = ref('name-asc')
+const browseSort = ref('modified-asc')
 const browseSortItems = [
   { title: '名称升序', value: 'name-asc' },
   { title: '名称降序', value: 'name-desc' },

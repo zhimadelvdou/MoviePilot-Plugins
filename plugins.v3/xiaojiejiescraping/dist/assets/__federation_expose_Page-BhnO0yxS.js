@@ -1,0 +1,1 @@
+import{importShared as a}from"./__federation_fn_import-E6wRZccp.js";import t from"./__federation_expose_AppPage-Dt5ym5KS.js";const{defineComponent:r,h:i}=await a("vue"),s=r({name:"XiaojiejiescrapingLegacyPage",inheritAttrs:!1,setup(o,{attrs:e}){return()=>i(t,e)}});export{s as default};

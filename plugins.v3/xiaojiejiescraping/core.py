@@ -186,6 +186,33 @@ def project_actress_evidence(value: dict | None, number: str) -> dict | None:
     return {"source": "attackers-official", "number": expected, "names": normalized}
 
 
+def project_javbus_actress_evidence(value: dict | None, number: str, media_id: str,
+                                    actors: list[dict]) -> dict | None:
+    """Project JavBus's ordered star-directory list for this exact response identity."""
+    if not isinstance(value, dict):
+        return None
+    expected = normalize_number(number)
+    identity = str(media_id or "")
+    names = value.get("names")
+    if (not expected or not IDENTIFIER.fullmatch(identity)
+            or normalize_number(identity) != expected
+            or value.get("source") != "javbus" or value.get("media_id") != identity
+            or normalize_number(value.get("number")) != expected
+            or not isinstance(names, list) or len(names) > 64
+            or not isinstance(actors, list)):
+        return None
+    cast_names = {actor.get("name") for actor in actors if isinstance(actor, dict)
+                  and isinstance(actor.get("name"), str)}
+    normalized = []
+    for name in names:
+        component = safe_component(name) if isinstance(name, str) else None
+        if component is None or component != name or name not in cast_names:
+            return None
+        if name not in normalized:
+            normalized.append(name)
+    return {"source": "javbus", "media_id": identity, "number": expected, "names": normalized}
+
+
 def render_nfo(info: dict, number: str) -> str:
     """只写 Manko 已核对字段，宿主后加的辅助 ID 不会进入 NFO。"""
     root = ET.Element("movie")

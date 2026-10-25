@@ -432,7 +432,7 @@ def test_actress_folder_preview_without_source_flag_waits_for_trusted_marker(
     item = preview.items[0]
     assert item.needs_actress_choice is False
     assert item.actor_candidates == []
-    assert "avdbs_actor=true" in item.message
+    assert "可信女主演来源证据" in item.message
 
 
 def test_only_true_flagged_actors_are_candidates_and_false_actor_cannot_be_chosen(

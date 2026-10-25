@@ -76,6 +76,46 @@ def test_javbus_search_uses_configured_json_api_without_global_proxy(monkeypatch
     assert all("avdbs_actor" not in actor for actor in result["actors"])
 
 
+def test_javbus_api_packet_carries_ordered_source_specific_actress_evidence():
+    document = {**API_DETAIL, "stars": [
+        {"id": "star-2", "name": "miru"},
+        {"id": "star-1", "name": "葵つかさ"},
+        {"id": "star-2", "name": "miru"},
+        {"id": "../unsafe", "name": "Unsafe/Directory"},
+        {"id": "star-3", "name": "Unsafe/Directory"},
+    ]}
+
+    packet = JavBusProvider(api_url="http://api.example.test")._parse_api_payload(document, "SONE-288")
+
+    assert packet["_actress_evidence"] == {
+        "source": "javbus", "media_id": "SONE-288", "number": "SONE-288",
+        "names": ["miru", "葵つかさ"],
+    }
+    assert packet["actors"] == [
+        {"id": "star-2", "name": "miru"},
+        {"id": "star-1", "name": "葵つかさ"},
+        {"id": "star-2", "name": "miru"},
+        {"id": "../unsafe", "name": "Unsafe/Directory"},
+        {"id": "star-3", "name": "Unsafe/Directory"},
+    ]
+    assert all("avdbs_actor" not in actor for actor in packet["actors"])
+
+
+@pytest.mark.parametrize("stars", [
+    [{"id": "star-1", "name": "miru"}, {"id": "star-1", "name": "葵つかさ"}],
+    [{"id": "star-1", "name": "miru"}, {"id": "star-2", "name": "miru"}],
+])
+def test_javbus_conflicting_star_directory_identities_leave_metadata_but_no_candidates(stars):
+    document = {**API_DETAIL, "stars": stars}
+
+    packet = JavBusProvider(api_url="http://api.example.test")._parse_api_payload(document, "SONE-288")
+
+    assert packet is not None
+    assert packet["record"]["_id"] == "SONE-288"
+    assert [actor["name"] for actor in packet["actors"]] == [star["name"] for star in stars]
+    assert packet["_actress_evidence"]["names"] == []
+
+
 HTML = """<html><body>
 <div class="container"><h3>SONE-288 Synthetic title</h3>
 <a class="bigImage"><img src="https://images.example.test/cover.jpg"></a>

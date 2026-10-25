@@ -1,4 +1,5 @@
 """插件自有手动整理入口的真实 SDK 合同与路径护栏。"""
+from copy import copy
 from pathlib import Path
 import os
 from types import SimpleNamespace
@@ -53,6 +54,148 @@ def manual_workspace(monkeypatch, tmp_path, plugin_host_context):
 
     workspace = ManualTransferWorkspace(plugin, tmp_path / "data", transfer=transfer)
     return plugin, workspace, root, target, media_path, calls
+
+
+@pytest.fixture
+def javbus_manual_workspace(manual_workspace):
+    plugin, workspace, root, target, media_path, calls = manual_workspace
+    # The base fixture stubs recognition for its Manko tests. Remove that stub so this
+    # contract exercises the plugin's real request, provider packet, and _accept path.
+    plugin.__dict__.pop("recognize_media", None)
+    plugin.init_plugin({"enabled": True, "sources": ["javbus"],
+                        "javbus_api_url": "http://api.example.test",
+                        "recognize_dirs": [str(root)]})
+    names = ["miru", "葵つかさ"]
+    packet = {
+        "record": {"_source": "javbus", "_id": "TEST-123", "number": "TEST-123",
+                   "title": "TEST-123 synthetic", "cover_image": None, "discription": []},
+        "number": "TEST-123",
+        "actors": [{"id": f"star-{index}", "name": name} for index, name in enumerate(names, 1)],
+        "_actress_evidence": {"source": "javbus", "media_id": "TEST-123",
+                              "number": "TEST-123", "names": names},
+    }
+
+    class Provider:
+        def search(self, number):
+            return dict(packet) if number == "TEST-123" else None
+
+        def fetch(self, identity):
+            return dict(packet) if identity == "TEST-123" else None
+
+    plugin._providers["javbus"] = Provider()
+    return plugin, workspace, root, target, media_path, calls, packet
+
+
+@pytest.mark.parametrize(("choice", "expected"), [(None, "miru"), ("葵つかさ", "葵つかさ")])
+def test_javbus_manual_preview_uses_source_evidence_in_order_and_keeps_full_cast(
+        javbus_manual_workspace, choice, expected):
+    plugin, workspace, _, target, source, calls, packet = javbus_manual_workspace
+    plugin._actress_subfolder = True
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="javbus", actress_subfolder=True,
+        actress_choices={str(source): choice} if choice else {},
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].actor_candidates == ["miru", "葵つかさ"]
+    assert preview.items[0].selected_actress == expected
+    assert calls[0]["target_path"] == target / expected
+    assert [actor["name"] for actor in calls[0]["mediainfo"].actors] == ["miru", "葵つかさ"]
+    assert all("avdbs_actor" not in actor for actor in calls[0]["mediainfo"].actors)
+
+
+@pytest.mark.parametrize("evidence_change", [
+    "missing", "wrong_source", "wrong_number", "wrong_media_id",
+])
+def test_javbus_manual_preview_fails_closed_without_matching_packet_evidence(
+        javbus_manual_workspace, evidence_change):
+    plugin, workspace, _, target, source, calls, packet = javbus_manual_workspace
+    plugin._actress_subfolder = True
+    if evidence_change == "missing":
+        packet.pop("_actress_evidence")
+    else:
+        evidence = packet["_actress_evidence"]
+        evidence[{"wrong_source": "source", "wrong_number": "number",
+                  "wrong_media_id": "media_id"}[evidence_change]] = "MANKO-999"
+    # Provider methods return independent top-level mappings; preserve the modified evidence.
+    plugin._providers["javbus"].search = lambda _number: packet
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="javbus", actress_subfolder=True,
+        actress_choices={str(source): "葵つかさ"},
+    ))
+
+    assert preview.summary.failed == 1
+    assert preview.items[0].media_id == "TEST-123"
+    assert preview.items[0].title == "TEST-123 synthetic"
+    assert preview.items[0].selected_actress is None
+    assert calls == []
+
+
+def test_javbus_manual_preview_actress_evidence_is_cleared_on_plugin_generation_change(
+        javbus_manual_workspace):
+    plugin, workspace, root, _target, source, _calls, _packet = javbus_manual_workspace
+    plugin._actress_subfolder = True
+    plugin._providers["javbus"].search = lambda _number: {
+        "record": {"_source": "javbus", "_id": "TEST-123", "number": "TEST-123",
+                   "title": "TEST-123 synthetic", "cover_image": None, "discription": []},
+        "number": "TEST-123", "actors": [{"id": "star-1", "name": "miru"}],
+        "_actress_evidence": {"source": "javbus", "media_id": "TEST-123",
+                              "number": "TEST-123", "names": ["miru"]},
+    }
+
+    media = plugin.recognize_media(meta=workspace._meta(source, "TEST-123"),
+                                   media_source="javbus")
+    assert media is not None
+    plugin.init_plugin({"enabled": True, "sources": ["javbus"],
+                        "javbus_api_url": "http://api.example.test",
+                        "recognize_dirs": [str(root)]})
+    assert plugin.actress_evidence(media, "TEST-123") == ([], [])
+
+
+def test_javbus_cached_media_keeps_bound_source_order_and_ignores_cast_flag_forgery(
+        javbus_manual_workspace):
+    plugin, workspace, _, _, source, _, packet = javbus_manual_workspace
+    calls = []
+    provider = plugin._providers["javbus"]
+
+    def search(number):
+        calls.append(number)
+        return dict(packet)
+
+    provider.search = search
+    metadata = workspace._meta(source, "TEST-123")
+    first = plugin.recognize_media(meta=metadata, media_source="javbus", cache=True)
+    cached = plugin.recognize_media(meta=metadata, media_source="javbus", cache=True)
+
+    assert first is not None and cached is not None and first is not cached
+    assert calls == ["TEST-123"]
+    expected = (["miru", "葵つかさ"], ["miru", "葵つかさ"])
+    assert plugin.actress_evidence(cached, "TEST-123") == expected
+    cached.actors.reverse()
+    for actor in cached.actors:
+        actor["avdbs_actor"] = True
+    assert plugin.actress_evidence(cached, "TEST-123") == expected
+    assert plugin.actress_evidence(copy(cached), "TEST-123") == ([], [])
+    cached.media_id = "MANKO-999"
+    assert plugin.actress_evidence(cached, "TEST-123") == ([], [])
+
+
+def test_javbus_legacy_cached_packet_without_actress_evidence_keeps_metadata(
+        javbus_manual_workspace):
+    plugin, workspace, _, _, source, _, packet = javbus_manual_workspace
+    packet.pop("_actress_evidence")
+    calls = []
+    plugin._providers["javbus"].search = lambda number: calls.append(number) or dict(packet)
+    metadata = workspace._meta(source, "TEST-123")
+
+    first = plugin.recognize_media(meta=metadata, media_source="javbus", cache=True)
+    cached = plugin.recognize_media(meta=metadata, media_source="javbus", cache=True)
+
+    assert first is not None and cached is not None
+    assert cached.media_id == "TEST-123"
+    assert plugin.actress_evidence(cached, "TEST-123") == ([], [])
+    assert calls == ["TEST-123"]
 
 
 def test_manual_options_and_routes_are_admin_only_with_explicit_models(manual_workspace):

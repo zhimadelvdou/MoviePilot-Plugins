@@ -216,6 +216,100 @@ def test_auto_handoff_uses_flagged_names_from_fresh_recognition(handoff, tmp_pat
     plugin.stop_service()
 
 
+def test_auto_javbus_handoff_uses_first_source_evidence_and_preserves_cast(
+        handoff, tmp_path, monkeypatch, sample_payload):
+    from app.plugins.xiaojiejiescraping import XiaojiejieScraping
+    from app.plugins.xiaojiejiescraping.scope import RecognitionContext
+    monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
+    plugin = XiaojiejieScraping()
+    plugin.init_plugin({"enabled": True, "sources": ["javbus"],
+                        "javbus_api_url": "http://api.example.test",
+                        "recognize_dirs": [str(handoff.inputs)]})
+    packet = deepcopy(sample_payload)
+    packet["record"].update({"_source": "javbus", "_id": "TEST-123"})
+    packet["actors"] = [
+        {"id": "star-1", "name": "miru"},
+        {"id": "star-2", "name": "葵つかさ"},
+        {"id": "star-3", "name": "Unmarked Cast Member"},
+    ]
+    packet["_actress_evidence"] = {
+        "source": "javbus", "media_id": "TEST-123", "number": "TEST-123",
+        "names": ["miru", "葵つかさ"],
+    }
+
+    class Provider:
+        def search(self, _number):
+            return deepcopy(packet)
+
+        def fetch(self, _identity):
+            return deepcopy(packet)
+
+    plugin._providers["javbus"] = Provider()
+    context = RecognitionContext("transfer", "local", str(handoff.source), (str(handoff.inputs),))
+    recognize = lambda request_context, meta, **kwargs: plugin.recognize_scoped(
+        request_context, meta, **kwargs)
+    config = replace(handoff.config, sources=("javbus",), mode="preview", actress_subfolder=True)
+    calls = []
+
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        target = Path(kwargs["target_path"]) / handoff.source.name
+        return True, {"items": [{"source": str(handoff.source), "source_storage": "local",
+                                  "target": str(target), "success": True}]}
+
+    coordinator = HandoffCoordinator(handoff.ledger, config, recognize, transfer=transfer,
+                                     history=handoff.history, actress_evidence=plugin.actress_evidence)
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    assert record is not None
+
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+
+    assert result[0]["state"] == "previewed"
+    assert calls[0]["target_path"] == handoff.output / "miru"
+    assert [actor["name"] for actor in calls[0]["mediainfo"].actors] == [
+        "miru", "葵つかさ", "Unmarked Cast Member",
+    ]
+    assert all("avdbs_actor" not in actor for actor in calls[0]["mediainfo"].actors)
+    plugin.stop_service()
+
+
+def test_auto_javbus_handoff_fails_closed_for_cast_without_packet_evidence(
+        handoff, tmp_path, monkeypatch, sample_payload):
+    from app.plugins.xiaojiejiescraping import XiaojiejieScraping
+    from app.plugins.xiaojiejiescraping.scope import RecognitionContext
+    monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
+    plugin = XiaojiejieScraping()
+    plugin.init_plugin({"enabled": True, "sources": ["javbus"],
+                        "javbus_api_url": "http://api.example.test",
+                        "recognize_dirs": [str(handoff.inputs)]})
+    packet = deepcopy(sample_payload)
+    packet["record"].update({"_source": "javbus", "_id": "TEST-123"})
+    packet["actors"] = [{"id": "star-1", "name": "Ordinary Cast Member"}]
+
+    class Provider:
+        def search(self, _number):
+            return deepcopy(packet)
+
+        def fetch(self, _identity):
+            return deepcopy(packet)
+
+    plugin._providers["javbus"] = Provider()
+    context = RecognitionContext("transfer", "local", str(handoff.source), (str(handoff.inputs),))
+    recognize = lambda request_context, meta, **kwargs: plugin.recognize_scoped(
+        request_context, meta, **kwargs)
+    config = replace(handoff.config, sources=("javbus",), mode="preview", actress_subfolder=True)
+    coordinator = HandoffCoordinator(handoff.ledger, config, recognize, transfer=handoff.transfer,
+                                     history=handoff.history, actress_evidence=plugin.actress_evidence)
+    assert coordinator.enqueue(handoff.torrent, handoff.source) is not None
+
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+
+    assert result[0]["state"] == "failed"
+    assert result[0]["payload"]["reason"] == "primary_actress_choice_required"
+    assert handoff.calls == []
+    plugin.stop_service()
+
+
 def test_target_must_exist_and_not_overlap_source_roots(handoff, tmp_path):
     child = handoff.inputs / "nested-output"
     child.mkdir()

@@ -455,7 +455,7 @@ class ManualTransferWorkspace:
                     selected_actress = trusted_names[0]
                     actress_choice_mode = "source_flag_first"
                 if selected_actress is None:
-                    message = ("本次来源识别没有 avdbs_actor=true 的可信女主演标记；等待可信标记后重试"
+                    message = ("本次来源识别没有可信女主演来源证据；等待来源数据补齐后重试"
                                if not trusted_names else "请从本片可信女主演候选中选择后重新预览")
                     items.append(ManualPreviewItem(
                         source=str(path), title=self._value(media, "title"),

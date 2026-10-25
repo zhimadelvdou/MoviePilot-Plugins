@@ -134,18 +134,18 @@ describe('manual transfer page', () => {
     const { api, wrapper } = setup()
     api.post.mockImplementation(async url => url.endsWith('/preview') ? {
       items: [{ source: '/downloads/ADN-000775.mkv', success: false,
-        message: '本次来源识别没有 avdbs_actor=true 的可信女主演标记；等待可信标记后重试',
+        message: '本次来源识别没有可信女主演来源证据；等待来源数据补齐后重试',
         needs_actress_choice: false, actor_candidates: [] }],
       summary: { total: 1, success: 0, failed: 1 },
     } : ({ state: 'completed', items: [], summary: {} }))
     await flushPromises()
-    expect(wrapper.text()).toContain('avdbs_actor=true')
+    expect(wrapper.text()).toContain('按识别来源提供的女优名单选择')
     await inputFor(wrapper, 'source-path').setValue('/downloads/ADN-000775.mkv')
     await selectValueFromMenu(wrapper, 'media-source', 'Manko')
     await setSwitch(wrapper, 'actress-subfolder', true)
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('等待可信标记后重试')
+    expect(wrapper.text()).toContain('等待来源数据补齐后重试')
     expect(wrapper.findAll('[data-testid^="actress-choice-"]')).toHaveLength(0)
   })
 

@@ -30,6 +30,7 @@ from .transport import AnonymousAsyncRequestUtils as AsyncRequestUtils, Anonymou
 
 from .core import IDENTIFIER, clean_text, normalize_number, record_numbers
 from .diagnostics import diagnose
+from .layout import safe_component
 
 
 MAX_HTML = 2_000_000
@@ -271,6 +272,10 @@ class JavBusProvider(_HtmlProvider):
             diagnose(self.source, "search", "schema_invalid")
             return None
         actors = []
+        actress_names = []
+        star_names_by_id = {}
+        star_ids_by_name = {}
+        ambiguous_star_identity = False
         for star in stars:
             if not isinstance(star, dict):
                 diagnose(self.source, "search", "schema_invalid")
@@ -281,7 +286,27 @@ class JavBusProvider(_HtmlProvider):
                     or not isinstance(name, str) or not name.strip() or len(name) > 512):
                 diagnose(self.source, "search", "schema_invalid")
                 return None
-            actors.append({"id": clean_text(str(star_id)).strip(), "name": clean_text(name).strip()})
+            normalized_star_id = clean_text(str(star_id)).strip()
+            normalized_name = clean_text(name).strip()
+            actors.append({"id": normalized_star_id, "name": normalized_name})
+
+            # JavBus's `stars` field is the source-owned actress-directory list.
+            # Keep the complete cast above, but use only safe IDs and directory names
+            # as folder evidence. A conflicting identity makes the entire list
+            # ambiguous; one unsafe item alone does not invalidate other safe stars.
+            if (not IDENTIFIER.fullmatch(normalized_star_id)
+                    or safe_component(normalized_name) != normalized_name):
+                continue
+            previous_name = star_names_by_id.get(normalized_star_id)
+            previous_id = star_ids_by_name.get(normalized_name)
+            if ((previous_name is not None and previous_name != normalized_name)
+                    or (previous_id is not None and previous_id != normalized_star_id)):
+                ambiguous_star_identity = True
+                continue
+            star_names_by_id[normalized_star_id] = normalized_name
+            star_ids_by_name[normalized_name] = normalized_star_id
+            if normalized_name not in actress_names:
+                actress_names.append(normalized_name)
 
         raw_date = payload.get("date")
         released = ""
@@ -320,7 +345,15 @@ class JavBusProvider(_HtmlProvider):
             record["video_duration"] = int(raw_runtime)
         elif type(raw_runtime) is int and 1 <= raw_runtime <= 999:
             record["video_duration"] = raw_runtime
-        return {"record": record, "number": expected, "actors": actors}
+        if ambiguous_star_identity:
+            actress_names = []
+        return {
+            "record": record, "number": expected, "actors": actors,
+            "_actress_evidence": {
+                "source": self.source, "media_id": expected,
+                "number": expected, "names": actress_names,
+            },
+        }
 
     def _decode_api_response(self, response, expected: str) -> tuple[dict | None, bool]:
         if response is None:

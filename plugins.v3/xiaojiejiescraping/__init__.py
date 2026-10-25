@@ -15,7 +15,7 @@ from app.sdk.media import MediaInfo
 from app.sdk.services import DownloaderHelper
 from app.schemas.types import MediaSource, MediaType, SystemConfigKey
 from .core import (SOURCE, IDENTIFIER, JsonCache, extract_number, image_map, normalize_number, project_record,
-                   project_actress_evidence, record_numbers, render_nfo)
+                   project_actress_evidence, project_javbus_actress_evidence, record_numbers, render_nfo)
 from .artwork import backdrop_candidates, is_usable_landscape
 from .provider import MankoProvider
 from .diagnostics import diagnose
@@ -43,7 +43,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.11"
+    plugin_version = "0.8.12"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -679,9 +679,14 @@ class XiaojiejieScraping(_PluginBase):
                     diagnose(source, "accept", "configuration_changed")
                     return None
                 projected = project_record(record, actual_number, self._current_actors(packet), self._image_hosts, source=source)
+                actress_evidence = (project_actress_evidence(packet.get("_actress_evidence"), actual_number)
+                                    if source == SOURCE else
+                                    project_javbus_actress_evidence(
+                                        packet.get("_actress_evidence"), actual_number,
+                                        str(record["_id"]), packet.get("actors", []))
+                                    if source == "javbus" else None)
                 cached = {"packet": packet, "projected": projected,
-                          "actress_evidence": project_actress_evidence(
-                              packet.get("_actress_evidence"), actual_number)}
+                          "actress_evidence": actress_evidence}
                 if persist:
                     cache.put(key, cached)
                     cache.put(source + ":id:" + str(record["_id"]), cached)
@@ -701,6 +706,8 @@ class XiaojiejieScraping(_PluginBase):
                     "number": actual_number, "names": flagged_names,
                 }
                 self._remember_actress_evidence(result, evidence, generation)
+            elif source == "javbus" and isinstance(cached["actress_evidence"], dict):
+                self._remember_actress_evidence(result, cached["actress_evidence"], generation)
             diagnose(source, "accept", "accepted")
             return result
         except (OSError, TypeError, ValueError, KeyError, AttributeError):
@@ -708,10 +715,31 @@ class XiaojiejieScraping(_PluginBase):
             return None
 
     def actress_evidence(self, media, number: str | None = None) -> tuple[list[str] | None, list[str]]:
-        """Return current Manko packet actors explicitly marked as actresses."""
+        """Return this MediaInfo's current source-owned actress candidates."""
         from .layout import actor_names
         source = str(getattr(getattr(media, "media_source", None), "value", getattr(media, "media_source", "")))
         identity = str(getattr(media, "media_id", "") or "")
+        if source == "javbus":
+            with self._lock:
+                entry = self._actress_evidence.get(id(media))
+                evidence = (entry[2] if entry is not None and entry[0]() is media
+                            and entry[1] == self._generation else None)
+            try:
+                expected = normalize_number(number) if number is not None else None
+                if (not IDENTIFIER.fullmatch(identity) or not isinstance(evidence, dict)
+                        or evidence.get("source") != source or evidence.get("media_id") != identity
+                        or not isinstance(evidence.get("number"), str)
+                        or normalize_number(evidence["number"]) != evidence["number"]
+                        or (number is not None and (expected is None or evidence["number"] != expected))
+                        or not isinstance(evidence.get("names"), list)):
+                    return [], []
+                names = [value for value in evidence["names"] if isinstance(value, str)
+                         and safe_component(value) == value]
+                actors = actor_names(media)
+                allowed = [name for name in names if name in actors]
+                return list(dict.fromkeys(names)), list(dict.fromkeys(allowed))
+            except Exception:
+                return [], []
         if source != SOURCE:
             return None, actor_names(media)
         with self._lock:
@@ -1152,7 +1180,7 @@ class XiaojiejieScraping(_PluginBase):
             {"component": "VSwitch", "props": {"model": "auxiliary_ack", "label": "我理解宿主仍可能补充 TMDB 辅助字段；已核对预览并接受该原生行为"}},
             {"component": "VTextField", "props": {"model": "handoff_limit", "type": "number", "label": "每轮最多处理的新文件（1–5，默认1）"}},
             {"component": "VSwitch", "props": {"model": "actor_images", "label": "GFriends 演员缩略图（还需批准 raw.githubusercontent.com 图片主机）"}},
-            {"component": "VSwitch", "props": {"model": "actress_subfolder", "label": "按女主演分目录（不能唯一确认时等待人工选择）"}},
+            {"component": "VSwitch", "props": {"model": "actress_subfolder", "label": "按女主演分目录（默认来源首位；手动预览可改选）"}},
             {"component": "VTextarea", "props": {"model": "image_hosts", "label": "批准的图片 HTTPS 主机，每行一个；空值不提供图片地址"}},
             {"component": "VAlert", "props": {"type": "info", "text": "; ".join(status.label + ("：离线适配，未实站验收" if status.state == "offline_adapter" else "：暂不可用，现行接口待核实" if status.state == "blocked" else "：待实现") for status in PROVIDERS)}},
         ]

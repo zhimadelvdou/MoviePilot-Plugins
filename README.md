@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.10 增加可选 JavBus 匿名识别；默认来源仍只有 Manko，须在来源配置中显式保存 JavBus 后才会参与手动及自动识别。JavBus 演员不提供可信女优证据，限流/访问验证时仅显示固定安全提示；该来源尚未实站验收。0.8.9 按 Manko 原始演员 packet 顺序默认选取首位可信女主演；手动预览可以选择其他可信候选并重新预览，预览与执行都会复核选择证据。无可信标记或选择不再有效时停止；所有演员继续写入 NFO。自动整理保持默认关闭、默认只读发现。
+这是开发版本。0.8.11 将 JavBus 详情查询改为调用单独配置的 API JSON 基址（局域网直连、不经 MoviePilot 系统代理），默认基址留空，且默认来源仍只有 Manko；须配置基址并在来源配置中显式保存 JavBus 后才会参与手动及自动识别。API 返回身份与字段结构会校验，缺失基址或错误响应安全失败；不再抓取 JavBus HTML。JavBus 演员保留 API 顺序及普通演员 ID/姓名，但不提供可信女优证据。API 取数与 MoviePilot 完整整理链的验收分开记录，部署状态以环境验证记录为准；本版本不承诺完整刮削链已验证。0.8.9 按 Manko 原始演员 packet 顺序默认选取首位可信女主演；手动预览可以选择其他可信候选并重新预览，预览与执行都会复核选择证据。无可信标记或选择不再有效时停止；所有演员继续写入 NFO。自动整理保持默认关闭、默认只读发现。
 
 ## 功能与边界
 
@@ -25,7 +25,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 | MGStage | 原生产品 URL/品番详情；保留数字前缀；遇年龄门槛不设置确认 Cookie |
 | DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
 | SOD | 产品详情表；不执行年龄/会话握手 |
-| JavBus/Jav321 | JavBus 仅匿名请求、严格核对详情番号；访问验证/429会安全提示，未实站验收 |
+| JavBus/Jav321 | JavBus 使用用户配置的 API JSON 基址直连，需严格核对详情番号；不使用 Cookie/账号、不抓 JavBus 页面 HTML；演员无可信女优标记。API 具体状态需在部署环境验证；未实站验收 |
 | FC2Hub | `id{number}` permalink 及经搜索确认的当前详情路由；不猜新版 slug |
 | FC2PPVDB / FC2CMADB | 匿名普通 GET `/articles/{video_id}` 的初始 Inertia `Articles/Show` 合同；核对页面路径和 video_id，不把 article.id 当产品 ID；不请求有访问争议的延迟演员接口 |
 | GFriends | 官方 `Filetree.json`：演员名精确匹配、按质量顺序选图；只取公开索引 |
@@ -45,7 +45,8 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 | 设置 | 默认 | 含义 |
 | --- | --- | --- |
 | enabled | false | 启用插件能力；初始化不联网 |
-| sources | Manko | 多选元数据来源，选择顺序即自动查询顺序；JavBus 需显式保存启用 |
+| sources | Manko | 多选元数据来源，选择顺序即自动查询顺序；JavBus 需配置 API 基址并显式保存启用 |
+| javbus_api_url | 空 | JavBus API 基址，例如 `http://NAS地址:8922`；留空时 JavBus 查询不可用，不含路径查询参数或认证信息 |
 | storage | local | 当前只支持本地挂载文件，暂不接受远程存储 |
 | recognize_dirs | 空 | 每行一个 MoviePilot 容器内绝对输入目录，含子目录 |
 | automatic_match_mode | 新配置默认 tag_or_path；旧配置缺省 tag_and_path | 自动匹配来源：tag、path、tag_or_path 或 tag_and_path。OR 模式至少需标签或路径之一；tag-only 从宿主映射的任务路径建立本次范围 |
@@ -147,7 +148,9 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 ## 测试、版本与许可
 
-0.8.10 增加 JavBus 匿名可选元数据来源，默认来源保持 Manko；保存 JavBus 到现有 `sources` 后才参与手动和自动识别。适配器严格核对请求番号和详情身份，兼容两类演员标记但不产生可信女优证据；driver-verify/访问验证、429、登录跳转、404 与网络异常会写入固定词表诊断并向手动预览显示安全提示，不记录上游正文或 URL。JavBus 海报须由用户将实际图片 URL 的精确主机加入 `image_hosts`，默认空值无海报。验证：network-none 隔离 SDK 定向回归 `504 passed`；完整 22 个测试文件 `1558 passed, 44 failed, 8 warnings, 7 subtests passed`。44 个失败的完整 nodeid 集合与 0.8.9 基线相同（SHA-256 `48bbe2a2b6dde3b87fe1067a3378374813917b391ed310e5325c23e6e9514b51`），无新增/缺失；8 条警告是既有 `test_handoff_ledger` 多线程 fork 弃用警告。当前仅代码及合成回归验收；实站只读仍遇 driver-verify/HTTP 429，未取得正常元数据，未部署，FANZA 仍搁置。测试日志和候选快照见 [JavBus 匿名接入验证记录](../outputs/javbus-anonymous-20261025/README.md)。
+0.8.11 将 JavBus 查询改为调用 `GET {javbus_api_url}/api/movies/{number}`，配置值只保存在用户插件设置中，提交默认留空。请求不经系统代理、不自动跟随重定向；JSON 大小、媒体类型、请求身份、标题、日期及演员结构均有限校验，失败仅写固定诊断，不记录响应内容或完整 URL。可选 director、producer、publisher 映射至导演/制片商字段，演员顺序保留但不产生可信女优标记；封面 URL 仍受 `image_hosts` 精确主机白名单约束。API 取数与 MoviePilot 完整整理链的验收分开记录，部署状态以环境验证记录为准；API 端点可达不代表宿主完整刮削链已验收。
+
+0.8.10 历史实现为 JavBus 匿名 HTML 来源，默认来源保持 Manko；该 HTML 适配现已被 0.8.11 的用户配置 API 适配取代。JavBus 需要配置 API 基址并显式保存到现有 `sources` 后才参与手动和自动识别。演员不产生可信女优证据；封面须将实际图片 URL 的精确主机加入 `image_hosts`，默认空值无海报。FANZA 仍搁置。
 
 0.8.9 多位可信女主演时，自动整理与手动预览默认按原始来源顺序选择第一位。手动页面允许改选可信候选，变更选择会使旧预览和确认失效，必须重新预览；执行前再次核验默认候选仍为首位，手动候选仍有本次原始 `avdbs_actor is True` 标记且匹配当前 cast。无可信证据、非法选择或证据变化均失败关闭；NFO 继续写入完整演员 cast。官方 MoviePilot V3 SDK 全组为 1552 passed、44 failed（7 subtests）；44 个失败均位于未修改的 `test_javrecognize_provider.py`，与 0.8.8 基线失败集合完全一致，且该 provider 与其测试文件未变。Vue 组件测试 45/45 通过，isolated production build 成功；runtime dist 增加 4 个带 hash 资产并更新 index 与 remoteEntry，保留旧 hash 资产。
 

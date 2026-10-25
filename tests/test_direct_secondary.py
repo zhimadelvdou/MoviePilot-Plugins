@@ -9,13 +9,6 @@ from app.plugins.xiaojiejiescraping import direct_secondary as sources  # pylint
 from app.sdk.network import AsyncRequestUtils, RequestUtils
 
 
-BUS = """<html><body><div class="container"><h3>TEST-123 Synthetic title</h3>
-<a class="bigImage"><img src="https://images.example.test/bus.jpg"></a>
-<div class="col-md-3 info"><p><span>識別碼:</span><span>TEST-123</span></p>
-<p><span>發行日期:</span> 2026-01-02</p></div>
-<a class="avatar-box"><div><img title="Synthetic Actor"></div></a>
-</div></body></html>"""
-
 JAV321 = """<html><head><link rel="canonical" href="/video/native00123"></head>
 <body><ul class="dropdown-menu"><li><a href="/video/native00123">Japanese</a></li></ul>
 <div class="panel-heading"><h3>Synthetic title</h3></div>
@@ -102,32 +95,6 @@ def invoke(client, method, value, asynchronous):
     if asynchronous:
         return asyncio.run(getattr(client, "async_" + method)(value))
     return getattr(client, method)(value)
-
-
-def test_javbus_exact_search_and_native_fetch(replay, asynchronous):
-    client = sources.JavBusProvider(timeout=7)
-    replay["routes"][("get", client.base + "/TEST-123")] = BUS
-    search = invoke(client, "search", "test_123", asynchronous)
-    assert search == invoke(client, "fetch", "TEST-123", asynchronous)
-    assert search["number"] == "TEST-123"
-    assert search["record"]["_source"] == "javbus"
-    assert search["record"]["_id"] == "TEST-123"
-    assert search["record"]["share_date"] == "2026-01-02"
-    assert search["actors"] == [{"name": "Synthetic Actor"}]
-    assert len(replay["calls"]) == 2
-
-
-@pytest.mark.parametrize("page", [
-    BUS.replace("<span>TEST-123</span>", "<span>TEST-124</span>"),
-    BUS.replace("<span>TEST-123</span>", ""),
-    BUS.replace("Synthetic title", "TEST-124 conflicting title"),
-    BUS.replace("</div>\n<a class=", "<p><span>識別碼:</span><span>TEST-124</span></p></div>\n<a class="),
-    "<html><title>TEST-123</title><h3>TEST-123 Synthetic title</h3></html>",
-])
-def test_javbus_does_not_guess_identity(replay, asynchronous, page):
-    client = sources.JavBusProvider(timeout=7)
-    replay["routes"][("get", client.base + "/TEST-123")] = page
-    assert invoke(client, "search", "TEST-123", asynchronous) is None
 
 
 def test_jav321_posts_only_number_and_preserves_native_identity(replay, asynchronous):
@@ -294,7 +261,6 @@ def test_http_text_charset_guess_does_not_corrupt_identity_labels(replay, asynch
 
 
 @pytest.mark.parametrize("provider,method,path,body,number", [
-    (sources.JavBusProvider, "get", "/TEST-123", BUS, "TEST-123"),
     (sources.Jav321Provider, "post", "/search", JAV321, "TEST-123"),
     (sources.FC2HubProvider, "get", "/search", hub_current(), "FC2-12345"),
 ])

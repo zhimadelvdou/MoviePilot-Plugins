@@ -194,130 +194,253 @@ class _HtmlProvider:
 class JavBusProvider(_HtmlProvider):
     source = "javbus"
     base = "https://www.javbus.com"
+    _MAX_ATTEMPTS = 2
+    _MAX_JSON_BYTES = 2_000_000
 
-    def _location_kind(self, location: str) -> str:
-        try:
-            target = urlsplit(urljoin(self.base + "/", location))
-            origin = urlsplit(self.base)
-            if (target.scheme != "https" or target.netloc != origin.netloc
-                    or target.username or target.password):
-                return ""
-            path = target.path.lower()
-        except (TypeError, ValueError):
-            return ""
-        if any(token in path for token in ("driver-verify", "captcha", "verify", "verification")):
-            return "access_verification_required"
-        if path.rstrip("/") in ("/login", "/signin", "/sign-in"):
-            return "login_required"
-        return ""
+    def __init__(self, timeout: int = 15, api_url: str = ""):
+        super().__init__(timeout=timeout)
+        self.api_url, self._api_url_error = self._validated_api_url(api_url)
 
     @staticmethod
-    def _body_kind(text: str) -> str:
-        html = _document(text)
-        if html is None:
-            return ""
-        # A details page may contain modal login controls or challenge scripts;
-        # only classify a page when the normal JavBus identity/title structure is absent.
-        has_details = bool(html.xpath(
-            "//div[contains(concat(' ',normalize-space(@class),' '),' info ')]"
-            "/p/span[normalize-space(.)='識別碼:']/following-sibling::span[1]"
-        ) and html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' container ')]/h3"))
-        if has_details:
-            return ""
-        titles = [value.strip().lower() for value in html.xpath("//title/text() | //h1/text()")]
-        if any(value in ("login", "sign in", "ログイン", "登入") for value in titles):
-            return "login_required"
-        if html.xpath("//form[@id='login' or @name='login' or contains(@action, '/login')]"
-                      " | //form[.//input[@type='password']]"):
-            return "login_required"
-        if html.xpath("//*[contains(concat(' ',normalize-space(@id),' '),' driver-verify ')"
-                      " or contains(concat(' ',normalize-space(@class),' '),' driver-verify ')"
-                      " or contains(concat(' ',normalize-space(@id),' '),' captcha ')"
-                      " or contains(concat(' ',normalize-space(@class),' '),' captcha ')]"):
-            return "access_verification_required"
-        if any(value in ("verification", "security verification", "captcha", "人机验证", "验证码")
-               for value in titles):
-            return "access_verification_required"
-        return ""
+    def _validated_api_url(value: str) -> tuple[str, str]:
+        if not isinstance(value, str) or not value.strip():
+            return "", "configuration_missing"
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+            path = parsed.path.rstrip("/")
+            if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment or "\\" in value
+                    or any(char.isspace() for char in value)
+                    or (port is not None and not 1 <= port <= 65535)
+                    or (parsed.path and not re.fullmatch(r"/[A-Za-z0-9._~/-]*", parsed.path))
+                    or any(part in (".", "..") for part in parsed.path.split("/"))):
+                return "", "configuration_invalid"
+            return f"{parsed.scheme.lower()}://{parsed.netloc}{path}", ""
+        except (TypeError, ValueError):
+            return "", "configuration_invalid"
 
-    def _response(self, response):
-        status, location, text = super()._response(response)
-        reason = ""
-        if response is None:
-            reason = "network_unavailable"
-        elif status == 429:
-            reason = "rate_limited"
-        elif status == 404:
-            reason = "not_found"
-        elif status in (401,):
-            reason = "login_required"
-        elif status == 403:
-            reason = "access_restricted"
-        elif status >= 500:
-            reason = "upstream_unavailable"
-        elif status in (301, 302, 303, 307, 308):
-            reason = self._location_kind(location)
-            if not reason and not self._safe_detail_url(location):
-                reason = "access_restricted"
-        elif status == 200:
-            reason = self._body_kind(text)
-        elif status:
-            reason = "access_restricted"
-        if reason:
-            diagnose(self.source, "search", reason, status=status or None)
-        return status, location, text
+    def _detail_api_url(self, number: str) -> str:
+        return f"{self.api_url}/api/movies/{number}"
 
-    def _detail_path(self, path: str) -> bool:
-        return bool(re.fullmatch(r"/[A-Za-z0-9_-]{1,128}/?", path)
-                    and normalize_number(path.strip("/")))
-
-    def _parse(self, html, expected: str) -> dict | None:
-        if html is None:
-            return None
-        codes = html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' info ')]"
-                           "/p/span[normalize-space(.)='識別碼:']/following-sibling::span[1]")
-        number = normalize_number(_single(codes))
-        if number != expected:
-            return None
-        title = _single(html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' container ')]/h3"))
-        released = _field(html.xpath("//div[contains(concat(' ',normalize-space(@class),' '),' info ')]"
-                                    "/p/span[normalize-space(.)='發行日期:']"))
-        # Keep both JavBus cast layouts in document order. These names never
-        # become trusted actress evidence.
-        actors = html.xpath(
-            "//a[contains(concat(' ',normalize-space(@class),' '),' avatar-box ')]/div/img/@title | "
-            "//div[contains(concat(' ',normalize-space(@class),' '),' star-name ')]//a[@title]/@title"
+    @staticmethod
+    def _is_async_request_error(error: Exception) -> bool:
+        return isinstance(error, httpx.RequestError) or any(
+            cls.__name__ == "RequestError" and cls.__module__.split(".", 1)[0] in {"httpx", "httpx2"}
+            for cls in type(error).__mro__
         )
-        cover = _single(html.xpath("//a[contains(concat(' ',normalize-space(@class),' '),' bigImage ')]/img/@src"))
-        return _packet(self.source, number, number, title, actors=actors, released=released, cover=cover, base=self.base)
+
+    @staticmethod
+    def _close_response(response):
+        if response is None:
+            return
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _entity_name(value) -> tuple[bool, str]:
+        if value is None:
+            return True, ""
+        if not isinstance(value, dict):
+            return False, ""
+        name = value.get("name")
+        if name is None or name == "":
+            return True, ""
+        if not isinstance(name, str) or len(name) > 512:
+            return False, ""
+        return True, clean_text(name).strip()
+
+    def _parse_api_payload(self, payload, expected: str) -> dict | None:
+        if not isinstance(payload, dict):
+            diagnose(self.source, "search", "schema_invalid")
+            return None
+        identity = payload.get("id")
+        if not isinstance(identity, str) or normalize_number(identity) != expected:
+            diagnose(self.source, "search", "identity_mismatch")
+            return None
+        title = payload.get("title")
+        if not isinstance(title, str) or not title.strip() or len(title) > 4096:
+            diagnose(self.source, "search", "schema_invalid")
+            return None
+        stars = payload.get("stars")
+        if not isinstance(stars, list) or len(stars) > 64:
+            diagnose(self.source, "search", "schema_invalid")
+            return None
+        actors = []
+        for star in stars:
+            if not isinstance(star, dict):
+                diagnose(self.source, "search", "schema_invalid")
+                return None
+            star_id, name = star.get("id"), star.get("name")
+            if (isinstance(star_id, bool) or not isinstance(star_id, (str, int))
+                    or not str(star_id).strip() or len(str(star_id)) > 128
+                    or not isinstance(name, str) or not name.strip() or len(name) > 512):
+                diagnose(self.source, "search", "schema_invalid")
+                return None
+            actors.append({"id": clean_text(str(star_id)).strip(), "name": clean_text(name).strip()})
+
+        raw_date = payload.get("date")
+        released = ""
+        if raw_date not in (None, ""):
+            if not isinstance(raw_date, str):
+                diagnose(self.source, "search", "schema_invalid")
+                return None
+            try:
+                released = date.fromisoformat(raw_date).isoformat()
+            except ValueError:
+                diagnose(self.source, "search", "schema_invalid")
+                return None
+
+        directors = []
+        companies = []
+        for key, target in (("director", directors), ("producer", companies), ("publisher", companies),
+                            ("series", [])):
+            valid, entity_name = self._entity_name(payload.get(key))
+            if not valid:
+                diagnose(self.source, "search", "schema_invalid")
+                return None
+            if entity_name and {"name": entity_name} not in target:
+                target.append({"name": entity_name})
+
+        record = {
+            "_source": self.source, "_id": expected, "number": expected,
+            "title": clean_text(title), "share_date": released,
+            "cover_image": _https_asset(payload.get("img"), self.base), "discription": [],
+        }
+        if directors:
+            record["directors"] = directors
+        if companies:
+            record["production_companies"] = companies
+        raw_runtime = payload.get("videoLength")
+        if isinstance(raw_runtime, str) and re.fullmatch(r"[1-9]\d{0,2}", raw_runtime.strip()):
+            record["video_duration"] = int(raw_runtime)
+        elif type(raw_runtime) is int and 1 <= raw_runtime <= 999:
+            record["video_duration"] = raw_runtime
+        return {"record": record, "number": expected, "actors": actors}
+
+    def _decode_api_response(self, response, expected: str) -> tuple[dict | None, bool]:
+        if response is None:
+            diagnose(self.source, "search", "transport_unavailable")
+            return None, True
+        status = getattr(response, "status_code", None)
+        if type(status) is not int:
+            diagnose(self.source, "search", "response_invalid")
+            return None, False
+        if status == 404:
+            diagnose(self.source, "search", "not_found", status=status)
+            return None, False
+        if status == 429:
+            diagnose(self.source, "search", "rate_limited", status=status)
+            return None, False
+        if status == 401:
+            diagnose(self.source, "search", "login_required", status=status)
+            return None, False
+        if status == 403:
+            diagnose(self.source, "search", "access_restricted", status=status)
+            return None, False
+        if 300 <= status <= 399:
+            diagnose(self.source, "search", "http_redirect", status=status)
+            return None, False
+        if status >= 500:
+            diagnose(self.source, "search", "upstream_unavailable", status=status)
+            return None, True
+        if status != 200:
+            diagnose(self.source, "search", "http_error", status=status)
+            return None, False
+        content_type = getattr(response, "headers", {}).get("Content-Type", "")
+        content_type = content_type.split(";", 1)[0].strip().lower()
+        if content_type != "application/json" and not content_type.endswith("+json"):
+            diagnose(self.source, "search", "response_invalid", status=status)
+            return None, False
+        body = getattr(response, "content", None)
+        if not isinstance(body, bytes) or not body or len(body) > self._MAX_JSON_BYTES:
+            diagnose(self.source, "search", "response_invalid", status=status)
+            return None, False
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            diagnose(self.source, "search", "invalid_json", status=status)
+            return None, False
+        return self._parse_api_payload(payload, expected), False
 
     def search(self, number: str) -> dict | None:
-        number = normalize_number(number)
-        if not number:
+        normalized = normalize_number(number)
+        if not normalized:
+            diagnose(self.source, "search", "invalid_id")
             return None
-        try:
-            html = self._load("/" + number)[0]
-        except requests.exceptions.RequestException:
-            diagnose(self.source, "search", "network_unavailable")
+        if not self.api_url:
+            diagnose(self.source, "search", self._api_url_error)
             return None
-        result = self._parse(html, number)
-        if not result:
-            diagnose(self.source, "search", "response_invalid")
-        return result
+        url = self._detail_api_url(normalized)
+        for attempt in range(self._MAX_ATTEMPTS):
+            response = client = None
+            retry = False
+            try:
+                client = RequestUtils(timeout=self.timeout, verify=True, proxies={}, accept_type="application/json")
+                response = client.request(method="get", url=url, allow_redirects=False)
+                result, retry = self._decode_api_response(response, normalized)
+                if not retry:
+                    return result
+            except requests.exceptions.RequestException:
+                diagnose(self.source, "search", "network_unavailable")
+                retry = True
+            except Exception:
+                diagnose(self.source, "search", "request_exception")
+                return None
+            finally:
+                self._close_response(response)
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+            if not retry or attempt + 1 == self._MAX_ATTEMPTS:
+                return None
+        return None
 
     async def async_search(self, number: str) -> dict | None:
-        number = normalize_number(number)
-        if not number:
+        normalized = normalize_number(number)
+        if not normalized:
+            diagnose(self.source, "search", "invalid_id")
             return None
-        try:
-            html = (await self._aload("/" + number))[0]
-        except httpx.RequestError:
-            diagnose(self.source, "search", "network_unavailable")
+        if not self.api_url:
+            diagnose(self.source, "search", self._api_url_error)
             return None
-        result = self._parse(html, number)
-        if not result:
-            diagnose(self.source, "search", "response_invalid")
-        return result
+        url = self._detail_api_url(normalized)
+        for attempt in range(self._MAX_ATTEMPTS):
+            response = client = None
+            retry = False
+            try:
+                client = AsyncRequestUtils(timeout=self.timeout, verify=True, proxies={}, accept_type="application/json")
+                response = await client.request(method="get", url=url, follow_redirects=False)
+                result, retry = self._decode_api_response(response, normalized)
+                if not retry:
+                    return result
+            except Exception as error:
+                if self._is_async_request_error(error):
+                    diagnose(self.source, "search", "network_unavailable")
+                    retry = True
+                else:
+                    diagnose(self.source, "search", "request_exception")
+                    return None
+            finally:
+                if response is not None:
+                    try:
+                        await response.aclose()
+                    except Exception:
+                        pass
+                if client is not None:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        pass
+            if not retry or attempt + 1 == self._MAX_ATTEMPTS:
+                return None
+        return None
 
     def fetch(self, identity: str) -> dict | None:
         return self.search(identity) if normalize_number(identity) == identity else None

@@ -27,6 +27,7 @@ _REASONS = frozenset({
     "media_type_rejected", "provider_unavailable", "invalid_id", "number_not_unique",
     "cache_hit", "cache_miss", "empty_result", "query_exception", "accepted",
     "source_mismatch", "identity_mismatch", "result_invalid", "configuration_changed",
+    "configuration_missing", "configuration_invalid",
     "transport_unavailable", "request_exception", "http_response", "http_error",
     "http_redirect", "invalid_json", "payload_invalid", "schema_invalid",
     "search_incomplete", "no_candidates", "candidates", "no_exact_match",

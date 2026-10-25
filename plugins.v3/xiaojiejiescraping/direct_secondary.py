@@ -34,6 +34,7 @@ from .layout import safe_component
 
 
 MAX_HTML = 2_000_000
+MAX_JAVBUS_SAMPLES = 8
 FC2PPVDB_MIGRATION_SOURCE = (
     "https://github.com/adadsws/fc2cmadb-crawler/blob/"
     "d2984abd8f24eeafc8fa3cbdfac32c070eb80389/CHANGELOG.md"
@@ -336,6 +337,20 @@ class JavBusProvider(_HtmlProvider):
             "title": clean_text(title), "share_date": released,
             "cover_image": _https_asset(payload.get("img"), self.base), "discription": [],
         }
+        cover = record["cover_image"]
+        samples = payload.get("samples")
+        if isinstance(samples, list):
+            backdrops = []
+            for sample in samples[:64]:
+                if not isinstance(sample, dict):
+                    continue
+                image = _https_asset(sample.get("src"), self.base)
+                if image and image != cover and image not in backdrops:
+                    backdrops.append(image)
+                    if len(backdrops) >= MAX_JAVBUS_SAMPLES:
+                        break
+            if backdrops:
+                record["backdrop_images"] = backdrops
         if directors:
             record["directors"] = directors
         if companies:

@@ -34,6 +34,7 @@ from app.schemas.types import TorrentStatus
 from .manual import ManualTransferWorkspace
 from .manual_api import api_routes as manual_api_routes
 from .layout import safe_component
+from .artwork_relay import JavBusArtworkRelay, api_routes as artwork_api_routes
 
 MATCH_MODES = frozenset({"tag", "path", "tag_or_path", "tag_and_path"})
 
@@ -43,7 +44,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.12"
+    plugin_version = "0.8.13"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -60,6 +61,7 @@ class XiaojiejieScraping(_PluginBase):
         self._image_hosts = ()
         self._artwork_lock = threading.RLock()
         self._artwork_cache = OrderedDict()
+        self._artwork_relay = JavBusArtworkRelay(self._artwork_state)
         self._provider = None
         self._providers = {}
         self._active_sources = (SOURCE,)
@@ -90,6 +92,7 @@ class XiaojiejieScraping(_PluginBase):
         config = config or {}
         with self._lock:
             self._generation += 1
+            self._artwork_relay.rotate(self._generation)
             self._actress_evidence.clear()
             self._enabled = config.get("enabled") is True
             self._storage = str(config.get("storage") or "local")
@@ -161,6 +164,21 @@ class XiaojiejieScraping(_PluginBase):
     def _lines(value) -> tuple[str, ...]:
         values = value.splitlines() if isinstance(value, str) else value if isinstance(value, list) else []
         return tuple(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))
+
+    @staticmethod
+    def _id_cache_key(source: str, identity: str) -> str:
+        namespace = ":artwork-v1" if source == "javbus" else ""
+        return f"{source}:id{namespace}:{identity}"
+
+    @staticmethod
+    def _number_cache_key(source: str, number: str) -> str:
+        namespace = ":artwork-v1" if source == "javbus" else ""
+        return f"{source}:number{namespace}:{number}"
+
+    def _artwork_state(self):
+        with self._lock:
+            return (self._enabled, "javbus" in self._active_sources,
+                    self._generation, self._image_hosts)
 
     def get_state(self) -> bool:
         """返回实例是否已启用。"""
@@ -588,7 +606,7 @@ class XiaojiejieScraping(_PluginBase):
             results = []
             for packet in packets:
                 identity = str(packet["record"]["_id"])
-                candidate = (generation, provider, cache, source + ":id:" + identity, identity, number, source)
+                candidate = (generation, provider, cache, self._id_cache_key(source, identity), identity, number, source)
                 result = self._accept(candidate, self._with_actor_images(packet), persist=False)
                 if result is None:
                     return []
@@ -608,7 +626,7 @@ class XiaojiejieScraping(_PluginBase):
             results = []
             for packet in packets:
                 identity = str(packet["record"]["_id"])
-                candidate = (generation, provider, cache, source + ":id:" + identity, identity, number, source)
+                candidate = (generation, provider, cache, self._id_cache_key(source, identity), identity, number, source)
                 enriched = await self._async_with_actor_images(packet)
                 result = await asyncio.to_thread(self._accept, candidate, enriched, persist=False)
                 if result is None:
@@ -648,14 +666,14 @@ class XiaojiejieScraping(_PluginBase):
                 if not media_source or not IDENTIFIER.fullmatch(identity):
                     diagnose(source, "fetch", "invalid_id")
                     return None
-                return self._generation, provider, self._cache, source + ":id:" + identity, identity, None, source
+                return self._generation, provider, self._cache, self._id_cache_key(source, identity), identity, None, source
             text = str(getattr(meta, "org_string", None) or getattr(meta, "name", None) or "")
             number = extract_number(text)
             if not number:
                 diagnose(source, "search", "number_not_unique")
                 return None
             cache_key = (source + ":number:complete-first-v1:" + number
-                         if source == SOURCE else source + ":number:" + number)
+                         if source == SOURCE else self._number_cache_key(source, number))
             return self._generation, provider, self._cache, cache_key, None, number, source
 
     def _accept(self, request, packet: dict | None, persist: bool = True) -> MediaInfo | None:
@@ -689,9 +707,11 @@ class XiaojiejieScraping(_PluginBase):
                           "actress_evidence": actress_evidence}
                 if persist:
                     cache.put(key, cached)
-                    cache.put(source + ":id:" + str(record["_id"]), cached)
+                    cache.put(self._id_cache_key(source, str(record["_id"])), cached)
+                display_projected = (self._artwork_relay.project_media_info(
+                    projected, generation, self._image_hosts) if source == "javbus" else projected)
             result = MediaInfo()
-            result.from_dict(projected)
+            result.from_dict(display_projected)
             if source == SOURCE:
                 flagged_names = []
                 for actor in packet.get("actors", []) if isinstance(packet.get("actors"), list) else []:
@@ -900,7 +920,7 @@ class XiaojiejieScraping(_PluginBase):
         with self._lock:
             if not self._enabled or source not in self._active_sources or not self._cache:
                 return None
-            data = self._cache.get(source + ":id:" + str(mediainfo.media_id))
+            data = self._cache.get(self._id_cache_key(source, str(mediainfo.media_id)))
             if not data:
                 return None
             try:
@@ -981,8 +1001,14 @@ class XiaojiejieScraping(_PluginBase):
         if not data:
             return None
         images = self._selected_artwork(data)
-        mediainfo.poster_path = images.get("poster.jpg")
-        mediainfo.backdrop_path = images.get("fanart.jpg")
+        fields = {"poster_path": images.get("poster.jpg"),
+                  "backdrop_path": images.get("fanart.jpg")}
+        if str(getattr(mediainfo, "media_source", None)) == "javbus":
+            with self._lock:
+                generation, hosts = self._generation, self._image_hosts
+            fields = self._artwork_relay.project_media_info(fields, generation, hosts)
+        mediainfo.poster_path = fields["poster_path"]
+        mediainfo.backdrop_path = fields["backdrop_path"]
         return mediainfo
 
     async def async_obtain_images(self, mediainfo) -> MediaInfo | None:
@@ -1109,7 +1135,10 @@ class XiaojiejieScraping(_PluginBase):
         """Register enabled plugin management APIs even when scheduled discovery is paused."""
         if not self._enabled:
             return []
-        return (manual_api_routes(self._manual) if self._manual else []) + automatic_api_routes(self)
+        routes = (manual_api_routes(self._manual) if self._manual else []) + automatic_api_routes(self)
+        if "javbus" in self._active_sources:
+            routes += artwork_api_routes(self._artwork_relay)
+        return routes
 
     @staticmethod
     def get_render_mode() -> tuple[str, str]:

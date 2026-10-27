@@ -13,7 +13,6 @@ const actressSubfolder = ref(false)
 const actressChoices = ref({})
 const preview = ref(null)
 const previewNeedsRefresh = ref(false)
-const confirmed = ref(false)
 const busy = ref(false)
 const previewBusy = ref(false)
 const outcome = ref('')
@@ -24,7 +23,7 @@ const browsePurpose = ref('manual')
 const browsePath = ref('')
 const parentPath = ref('')
 const browseItems = ref([])
-const browseSort = ref('name-asc')
+const browseSort = ref('modified-asc')
 const browseSortItems = [
   { title: '名称升序', value: 'name-asc' },
   { title: '名称降序', value: 'name-desc' },
@@ -99,7 +98,7 @@ const sortedBrowseItems = computed(() => {
 const previewExpired = computed(() => !preview.value || !Number.isFinite(previewExpiryMs.value) || previewExpiryMs.value <= now.value)
 const executionLocked = computed(() => outcome.value === 'pendingaccepted' || outcome.value === 'unknown')
 const formLocked = computed(() => busy.value || executionLocked.value)
-const canExecute = computed(() => !!preview.value && !previewNeedsRefresh.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && confirmed.value && !busy.value && !previewBusy.value && outcome.value === '')
+const canExecute = computed(() => !!preview.value && !previewNeedsRefresh.value && !previewExpired.value && preview.value.summary?.failed === 0 && preview.value.summary?.success > 0 && !busy.value && !previewBusy.value && outcome.value === '')
 const endpoint = (name) => `plugin/${props.pluginId}/manual/${name}`
 const automaticEndpoint = (name) => `plugin/${props.pluginId}/automatic/${name}`
 const pluginConfigEndpoint = () => `plugin/${props.pluginId}`
@@ -148,7 +147,6 @@ function invalidatePreview() {
   requestGeneration += 1
   preview.value = null
   previewNeedsRefresh.value = false
-  confirmed.value = false
   outcome.value = ''
   clearPendingPreview()
   error.value = ''
@@ -176,7 +174,6 @@ function setActressChoice(path, value) {
   requestGeneration += 1
   actressChoices.value = { ...actressChoices.value, [path]: value }
   previewNeedsRefresh.value = true
-  confirmed.value = false
   outcome.value = ''
   clearPendingPreview()
   error.value = ''
@@ -277,7 +274,6 @@ async function createPreview() {
     if (requestGeneration === generation && snapshot.path === sourcePath.value && snapshot.target_path === targetPath.value && snapshot.media_source === mediaSource.value && !formLocked.value) {
       preview.value = result
       previewNeedsRefresh.value = false
-      confirmed.value = false
     }
   } catch {
     if (requestGeneration === generation) error.value = '预览失败，请检查所选路径和来源。'
@@ -521,7 +517,6 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
           <VCardTitle class="d-flex flex-wrap justify-space-between ga-3"><span>预览结果</span><VChip :color="previewExpired || previewNeedsRefresh ? 'error' : 'success'" variant="tonal">{{ previewNeedsRefresh ? '选择已变更，请重新预览' : previewExpired ? '预览已过期' : `有效至 ${new Date(previewExpiryMs).toLocaleString()}` }}</VChip></VCardTitle>
       <VCardText><p>{{ preview.summary?.success || 0 }} 项可整理，{{ preview.summary?.failed || 0 }} 项失败</p>
         <VTable density="comfortable"><thead><tr><th>项目</th><th>来源路径</th><th>完整来源 ID</th><th>目标路径</th><th>结果</th></tr></thead><tbody><tr v-for="(item, index) in displayItems" :key="`${item.source}-${item.target}-${index}`"><td>{{ item.title || '—' }}<VSelect v-if="item.needs_actress_choice" :data-testid="`actress-choice-${index}`" class="mt-2" density="compact" label="演员候选（选择女主演）" :items="item.actor_candidates || []" :model-value="actressChoices[item.source] || item.selected_actress || null" :disabled="formLocked" @update:model-value="setActressChoice(item.source, $event)" /></td><td>{{ item.source }}</td><td>{{ item.media_id || '—' }}</td><td>{{ item.target || '—' }}</td><td>{{ itemStatus(item) }}</td></tr></tbody></VTable>
-        <VCheckbox data-testid="confirm-transfer" :model-value="confirmed" label="我已核对预览，并确认按上述硬链接路径整理。" :disabled="!preview || previewNeedsRefresh || previewExpired || formLocked" @update:model-value="confirmed = $event" />
         <div class="d-flex flex-wrap align-center ga-2"><VBtn data-testid="execute" color="primary" :disabled="!canExecute" :loading="busy && outcome === 'pendingaccepted'" @click="execute">确认并整理</VBtn><VBtn v-if="outcome" data-testid="refresh-status" variant="tonal" :disabled="busy" :loading="busy" @click="refreshStatus">只读刷新状态</VBtn></div>
         <VAlert v-if="outcome === 'pendingaccepted'" class="mt-3" type="info" variant="tonal">请求已受理，正在等待结果。</VAlert><VAlert v-else-if="outcome === 'completed'" class="mt-3" type="success" variant="tonal">硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史</VAlert><VAlert v-else-if="outcome === 'failed'" class="mt-3" type="error" variant="tonal">整理失败，原任务已结束。</VAlert><VAlert v-else-if="outcome === 'unknown'" class="mt-3" type="error" variant="tonal">结果未知，不能重复提交。</VAlert>
         <p v-if="preview.execution" class="text-body-2">任务 {{ preview.execution.state }}：{{ preview.execution.summary?.success || 0 }} 项成功，{{ preview.execution.summary?.failed || 0 }} 项失败</p>

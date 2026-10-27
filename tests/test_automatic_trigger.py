@@ -304,6 +304,17 @@ def test_category_mode_discovers_av_category_without_av_tag_through_real_poll(au
     assert "AV" not in {tag.strip() for tag in torrent.tags.split(",")}
 
 
+def test_category_poll_discovers_when_public_manifest_ids_are_missing(automatic_plugin):
+    plugin, _, _, _, source = _configure_category_poll(automatic_plugin)
+    plugin.chain.torrent_files = lambda **_kwargs: [DownloaderFile(
+        id=None, name=source.name, size=source.stat().st_size, priority=1, progress=1)]
+
+    assert plugin.get_service()
+    discovered = plugin.poll_completed()
+
+    assert [row["path"] for row in discovered] == [str(source)]
+
+
 def test_category_mode_does_not_treat_av_tag_as_category(automatic_plugin):
     plugin, _, torrent, raw, _ = _configure_category_poll(automatic_plugin)
     torrent.category = "OTHER"

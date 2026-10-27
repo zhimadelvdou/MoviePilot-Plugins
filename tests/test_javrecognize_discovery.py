@@ -380,6 +380,50 @@ def test_manifest_intersection_uses_real_sdk_file_rows_and_excludes_shared_root_
     assert discovery.owned_torrent_files(torrent, candidates + (extra,), rows) == candidates
 
 
+def test_manifest_with_all_missing_public_ids_uses_response_position_as_internal_identity(ownership_manifest):
+    torrent, candidates, manifest = ownership_manifest
+    rows = [DownloaderFile.model_validate({**manifest[0], "id": None})]
+
+    assert rows[0].id is None
+    assert discovery.owned_torrent_files(torrent, candidates, rows) == candidates
+    missing_field_row = {key: value for key, value in manifest[0].items() if key != "id"}
+    assert discovery.owned_torrent_files(torrent, candidates, [missing_field_row]) == candidates
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("name", "../TEST-123.mkv"), ("name", "not-present.mkv"),
+    ("size", 999), ("priority", None), ("progress", 0.99),
+])
+def test_missing_id_does_not_relax_other_manifest_ownership_checks(ownership_manifest, field, value):
+    torrent, candidates, manifest = ownership_manifest
+    row = {**manifest[0], "id": None, field: value}
+
+    assert discovery.owned_torrent_files(torrent, candidates, [row]) is None
+
+
+def test_missing_id_does_not_allow_duplicate_names(ownership_manifest):
+    torrent, candidates, manifest = ownership_manifest
+    rows = [{**manifest[0], "id": None}, {**manifest[0], "id": None}]
+
+    assert discovery.owned_torrent_files(torrent, candidates, rows) is None
+
+
+def test_manifest_rejects_mixing_missing_and_explicit_ids(ownership_manifest):
+    torrent, candidates, manifest = ownership_manifest
+    second = candidates[0].parent / "TEST-124.mkv"
+    second.write_bytes(b"another completed video")
+    candidates = candidates + (second,)
+    rows = [
+        DownloaderFile.model_validate({**manifest[0], "id": None}),
+        DownloaderFile.model_validate({
+            "id": 1, "name": second.name, "size": second.stat().st_size,
+            "priority": 1, "progress": 1,
+        }),
+    ]
+
+    assert discovery.owned_torrent_files(torrent, candidates, rows) is None
+
+
 @pytest.mark.parametrize(("field", "value"), [
     ("id", True), ("id", "0"), ("id", -1), ("id", 1),
     ("name", "../TEST-123.mkv"), ("name", "/TEST-123.mkv"), ("name", "a\\file.mkv"),

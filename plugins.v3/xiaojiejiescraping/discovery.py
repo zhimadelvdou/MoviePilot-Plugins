@@ -136,7 +136,8 @@ def owned_torrent_files(torrent, candidates: tuple[Path, ...], manifest) -> tupl
     if len(candidate_map) != len(candidates):
         return None
     names, identities, selected = set(), set(), []
-    for item in manifest:
+    missing_ids: bool | None = None
+    for position, item in enumerate(manifest):
         read = item.get if isinstance(item, dict) else lambda key, default=None: getattr(item, key, default)
         name, identity = read("name"), read("id")
         size, priority, progress = read("size"), read("priority"), read("progress")
@@ -144,6 +145,15 @@ def owned_torrent_files(torrent, candidates: tuple[Path, ...], manifest) -> tupl
                 or any(ord(char) < 32 or ord(char) == 127 for char in name)
                 or Path(name).is_absolute() or any(part in ("", ".", "..") for part in name.split("/"))):
             return None
+        id_is_missing = identity is None
+        if missing_ids is None:
+            missing_ids = id_is_missing
+        elif missing_ids != id_is_missing:
+            return None
+        if id_is_missing:
+            # Some public SDK projections omit downloader IDs. This position is
+            # only an internal continuity check; it does not claim a real ID.
+            identity = position
         if type(identity) is not int or identity < 0 or identity in identities or name in names:
             return None
         if type(size) is not int or size < 0 or type(priority) is not int or priority < 0:

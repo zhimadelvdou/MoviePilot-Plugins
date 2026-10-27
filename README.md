@@ -150,7 +150,7 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 ## 测试、版本与许可
 
-0.8.14 新增独立 `category` 自动匹配模式及 `torrent_category` 配置。qBittorrent 列表投影分类和 fresh raw completion row 均须精确匹配配置值；分类模式将 `tag=None` 传给文件候选筛选，并用已映射任务路径建立安全 task root。tag-only 仍使用 MoviePilot 映射任务路径，不从 raw `save_path` 拼接候选。完整公开文件清单继续用于 ownership 验证；同文件系统约束、原生监控重叠、source identity/女优校验及 `auto_new_only` 仍由既有路径负责。每次筛选、入队和执行回调都会重新读取 raw row 并复核分类。旧配置和原四种匹配语义不自动转换；只有 category 模式把 `torrent_category` 纳入 scope signature，切换到分类模式或修改分类值会重新建立新任务边界。边界重置前已完成的任务须单独有界处理，不应为重试而关闭 `auto_new_only`。本地实现不代表已部署或真实整理链验收。
+0.8.14 新增独立 `category` 自动匹配模式及 `torrent_category` 配置。qBittorrent 列表投影分类和 fresh raw completion row 均须精确匹配配置值；分类模式将 `tag=None` 传给文件候选筛选，并用已映射任务路径建立安全 task root。tag-only 仍使用 MoviePilot 映射任务路径，不从 raw `save_path` 拼接候选。完整公开文件清单继续用于 ownership 验证；当 SDK 投影中的所有文件 ID 都缺失或为 `None` 时，仅以清单位置作内部连续性检查，名称、大小、路径和完成状态校验不变；缺失 ID 与显式 ID 混合时仍拒绝。该内部序号不代表下载器提供的真实文件 ID。同文件系统约束、原生监控重叠、source identity/女优校验及 `auto_new_only` 仍由既有路径负责。每次筛选、入队和执行回调都会重新读取 raw row 并复核分类。旧配置和原四种匹配语义不自动转换；只有 category 模式把 `torrent_category` 纳入 scope signature，切换到分类模式或修改分类值会重新建立新任务边界。边界重置前已完成的任务须单独有界处理，不应为重试而关闭 `auto_new_only`。本地实现不代表已部署或真实整理链验收。
 
 0.8.13 为 JavBus 的搜索/详情 `MediaInfo` 图片字段增加签名代理：`samples[].src` 按来源顺序筛选为最多 8 个不同 HTTPS 候选，封面相同项不作为背景；缺失或损坏样图不影响其它元数据或女优证据。图片路由要求当前启用 JavBus、当前 allowlist 保留精确图片主机、签名未过期且与配置代际一致；只接受受限路径，使用固定根 Referer、禁止重定向、8 秒请求超时和 8 MiB 上限，并校验 MIME、真实解码格式和尺寸。搜索及详情展示字段使用同源限时 URL，签名不含 MoviePilot API token。缓存使用独立 `artwork-v1` JavBus 命名空间，旧缓存保留但不作为新版本样图命中。`metadata_img` 和 NFO 仍使用原始投影及现有 `image_hosts` 规则，因此本次代理不保证 MoviePilot 原生图片下载，也不构成完整刮削或整理验收。
 

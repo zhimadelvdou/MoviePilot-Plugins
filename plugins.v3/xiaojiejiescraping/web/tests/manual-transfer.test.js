@@ -103,7 +103,7 @@ describe('manual transfer page', () => {
     }))
   })
 
-  it('shows the default trusted actress, clears confirmation on change, and previews the explicit choice', async () => {
+  it('shows the default trusted actress and requires a fresh preview after changing the choice', async () => {
     const { api, wrapper } = setup({ optionsValue: { ...options, actress_subfolder: true } })
     const selectedPreview = { ...goodPreview, items: [{ ...goodPreview.items[0],
       needs_actress_choice: true, actor_candidates: ['女優甲', '女優乙'], selected_actress: '女優甲' }] }
@@ -116,11 +116,10 @@ describe('manual transfer page', () => {
     await flushPromises()
 
     expect(selectComponent(wrapper, 'actress-choice-0').props('modelValue')).toBe('女優甲')
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
+    expect(wrapper.find('[data-testid="confirm-transfer"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="execute"]').attributes('disabled')).toBeUndefined()
     await selectValue(wrapper, 'actress-choice-0', '女優乙')
     expect(wrapper.text()).toContain('选择已变更，请重新预览')
-    expect(inputFor(wrapper, 'confirm-transfer').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="execute"]').attributes('disabled')).toBeDefined()
 
     await wrapper.get('[data-testid="preview"]').trigger('click')
@@ -527,23 +526,25 @@ describe('manual transfer page', () => {
     expect(wrapper.text()).toContain('ID-123')
   })
 
-  it('invalidates preview on edits and requires confirmation before one execute', async () => {
+  it('invalidates preview on edits and executes once while a preview is valid', async () => {
     const { api, wrapper } = setup()
     await flushPromises()
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await selectValue(wrapper, 'media-source', 'manko')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[data-testid="execute"]').element.disabled).toBe(true)
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
+    expect(wrapper.find('[data-testid="confirm-transfer"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="execute"]').element.disabled).toBe(false)
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await flushPromises()
     expect(api.post.mock.calls.filter(([url]) => url.endsWith('/execute'))).toHaveLength(1)
+    expect(api.post).toHaveBeenCalledWith('plugin/plugin-x/manual/execute', { preview_id: 'p1' })
     expect(wrapper.text()).toContain('硬链接整理已核实；刮削结果请查看 MoviePilot 整理历史')
     expect(wrapper.text()).not.toContain('整理已完成')
     await inputFor(wrapper, 'target-path').setValue('/library/other')
     expect(wrapper.text()).not.toContain('预览有效')
+    expect(wrapper.find('[data-testid="execute"]').exists()).toBe(false)
   })
 
   it('offers read-only status refresh after an uncertain execution response', async () => {
@@ -554,7 +555,6 @@ describe('manual transfer page', () => {
     await selectValue(wrapper, 'media-source', 'manko')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('结果未知')
@@ -600,7 +600,6 @@ describe('manual transfer page', () => {
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('整理失败')
@@ -618,8 +617,8 @@ describe('manual transfer page', () => {
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     await wrapper.get('[data-testid="execute"]').trigger('click')
+    expect(wrapper.get('[data-testid="execute"]').element.disabled).toBe(true)
     expect(inputFor(wrapper, 'source-path').element.disabled).toBe(true)
     expect(inputFor(wrapper, 'target-path').element.disabled).toBe(true)
     expect(selectComponent(wrapper, 'media-source').props('disabled')).toBe(true)
@@ -644,7 +643,6 @@ describe('manual transfer page', () => {
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await flushPromises()
     await wrapper.get('[data-testid="refresh-status"]').trigger('click')
@@ -688,7 +686,6 @@ describe('manual transfer page', () => {
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     await wrapper.get('[data-testid="execute"]').trigger('click')
     await flushPromises()
     expect(sessionStorage.getItem('xiaojiejiescraping:manual-pending:plugin-x')).toBe('p1')
@@ -720,7 +717,6 @@ describe('manual transfer page', () => {
     await inputFor(wrapper, 'source-path').setValue('/downloads/item')
     await wrapper.get('[data-testid="preview"]').trigger('click')
     await flushPromises()
-    await inputFor(wrapper, 'confirm-transfer').setValue(true)
     expect(wrapper.get('[data-testid="execute"]').element.disabled).toBe(false)
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()

@@ -44,7 +44,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.16"
+    plugin_version = "0.8.17"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -62,6 +62,9 @@ class XiaojiejieScraping(_PluginBase):
         self._artwork_lock = threading.RLock()
         self._artwork_cache = OrderedDict()
         self._artwork_relay = JavBusArtworkRelay(self._artwork_state)
+        self._rename_event_manager = None
+        self._rename_event_type = None
+        self._rename_event_handler = self._on_transfer_rename_build
         self._provider = None
         self._providers = {}
         self._active_sources = (SOURCE,)
@@ -91,6 +94,7 @@ class XiaojiejieScraping(_PluginBase):
     def init_plugin(self, config: dict | None = None) -> None:
         """每次重载替换实例状态，不联网、不扫描目录、不调度旧记录修复。"""
         config = config or {}
+        self._remove_javbus_rename_hook()
         with self._lock:
             self._generation += 1
             self._artwork_relay.rotate(self._generation)
@@ -163,6 +167,7 @@ class XiaojiejieScraping(_PluginBase):
             diagnose("plugin", "configure", "enabled" if self._enabled else "disabled", count=len(self._active_sources))
             for source in self._active_sources:
                 diagnose(source, "configure", "enabled")
+        self._register_javbus_rename_hook()
 
 
     @staticmethod
@@ -185,6 +190,96 @@ class XiaojiejieScraping(_PluginBase):
             return (self._enabled, "javbus" in self._active_sources,
                     self._generation, self._image_hosts)
 
+    def _register_javbus_rename_hook(self) -> bool:
+        """Register the host rename extension only while JavBus is enabled."""
+        with self._lock:
+            active = self._enabled and "javbus" in self._active_sources
+        if not active or self._rename_event_manager is not None:
+            return False
+        try:
+            from app.schemas.types import ChainEventType
+
+            event_type = ChainEventType.TransferRenameBuild
+            manager = getattr(self, "eventmanager", None)
+            add_listener = getattr(manager, "add_event_listener", None)
+            remove_listener = getattr(manager, "remove_event_listener", None)
+            if not event_type or not callable(add_listener) or not callable(remove_listener):
+                raise AttributeError("rename event API unavailable")
+            add_listener(event_type, self._rename_event_handler)
+        except Exception:
+            diagnose("javbus", "configure", "provider_unavailable")
+            return False
+        self._rename_event_manager = manager
+        self._rename_event_type = event_type
+        return True
+
+    def _remove_javbus_rename_hook(self) -> bool:
+        manager = self._rename_event_manager
+        event_type = self._rename_event_type
+        if manager is None or not event_type:
+            return True
+        remove_listener = getattr(manager, "remove_event_listener", None)
+        if not callable(remove_listener):
+            diagnose("javbus", "configure", "provider_unavailable")
+            return False
+        try:
+            remove_listener(event_type, self._rename_event_handler)
+        except Exception:
+            diagnose("javbus", "configure", "provider_unavailable")
+            return False
+        self._rename_event_manager = None
+        self._rename_event_type = None
+        return True
+
+    def _on_transfer_rename_build(self, event_data) -> None:
+        """Use the owned JavBus number for the formatter copy, never raw media metadata."""
+        payload = getattr(event_data, "event_data", None)
+        if payload is None and isinstance(event_data, dict):
+            payload = event_data
+        if isinstance(payload, dict):
+            rename_dict = payload.get("rename_dict")
+        else:
+            rename_dict = getattr(payload, "rename_dict", None)
+        if not isinstance(rename_dict, dict):
+            return
+        mediainfo = rename_dict.get("__mediainfo__")
+        if mediainfo is None:
+            return
+        if str(getattr(mediainfo, "media_source", None)) != "javbus":
+            return
+        with self._lock:
+            if not self._enabled or "javbus" not in self._active_sources:
+                return
+            generation = self._generation
+        media_type = getattr(mediainfo, "type", None)
+        media_type = getattr(media_type, "value", media_type)
+        if media_type not in (MediaType.MOVIE, MediaType.MOVIE.value):
+            return
+        try:
+            owned = self._owned(mediainfo)
+        except Exception:
+            return
+        if not owned:
+            return
+        try:
+            packet = owned["packet"]
+            record = packet["record"]
+            number = packet["number"]
+            identity = str(getattr(mediainfo, "media_id", ""))
+            if (record.get("_source", "javbus") != "javbus"
+                    or str(record.get("_id")) != identity
+                    or not isinstance(number, str)
+                    or normalize_number(number) != number
+                    or normalize_number(identity) != number):
+                return
+        except Exception:
+            return
+        with self._lock:
+            if (not self._enabled or "javbus" not in self._active_sources
+                    or generation != self._generation):
+                return
+            rename_dict["title"] = number
+
     def get_state(self) -> bool:
         """返回实例是否已启用。"""
         return self._enabled
@@ -204,6 +299,7 @@ class XiaojiejieScraping(_PluginBase):
             self._manual = None
             # Reload teardown revokes memory only; persistent new-task boundary is preserved.
             self._auto_guard = None
+        self._remove_javbus_rename_hook()
 
     def get_service(self) -> list[dict]:
         """宿主管理五分钟轮询；默认只读，整理须另选执行模式及完整权限。"""

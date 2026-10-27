@@ -188,6 +188,30 @@ def offline_plugin(monkeypatch, tmp_path, sample_payload, plugin_host_context):
     release_scraping_chain()
 
 
+@pytest.fixture
+def bind_current_plugin_event_handler(offline_plugin, plugin_host_context):
+    """通过 SDK resolver 接口把当前测试插件实例绑定给正式事件分发器。"""
+    from app.runtime.event.binding import EventHandlerBinding
+
+    resolver_name = "xiaojiejie-native-test"
+    event_manager = plugin_host_context.event_manager
+
+    def resolve(owner_class):
+        if owner_class is type(offline_plugin):
+            return EventHandlerBinding(
+                instance=offline_plugin,
+                owner_name=offline_plugin.get_name(),
+                run_sync_in_threadpool=True,
+            )
+        return None
+
+    event_manager.register_handler_instance_resolver(resolver_name, resolve)
+    try:
+        yield
+    finally:
+        event_manager.unregister_handler_instance_resolver(resolver_name)
+
+
 def test_native_manual_preview_accepts_plugin_native_identity(offline_plugin, tmp_path, monkeypatch, request):
     """插件号码识别出的原生身份可通过旧 SDK 签名进入真实整理预览。"""
     assert "recognize_source" not in inspect.signature(TransferChain.do_transfer).parameters
@@ -264,6 +288,119 @@ def test_native_manual_preview_accepts_plugin_native_identity(offline_plugin, tm
         original.st_mtime_ns,
         original.st_nlink,
     )
+
+
+def test_native_manual_source_titles_produce_consistent_filename(
+    offline_plugin, bind_current_plugin_event_handler, tmp_path, monkeypatch,
+):
+    """Compare source-dependent titles at the real native formatter preview seam."""
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+    from app.sdk.config import settings
+
+    monkeypatch.setattr(
+        settings,
+        "MOVIE_RENAME_FORMAT",
+        "{{title}}{% if year %} ({{year}}){% endif %}/{{title}}{% if year %}({{year}}){% endif %}{% if part %}-{{part}}{% endif %}{% if edition %}-{{edition}}{% endif %}{% if videoFormat %}-{{videoFormat}}{% endif %}{% if videoCodec %}-{{videoCodec}}{% endif %}{% if audioCodec %}-{{audioCodec}}{% endif %}{% if effect %}-{{effect}}{% endif %}{{fileExt}}",
+    )
+
+    number, year = "SYN-123", "2026"
+    javbus_title = f"{number} Synthetic JavBus Work Title"
+    source = tmp_path / "downloads" / f"{number}.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic filename fixture; no media decoding")
+    library = tmp_path / "library"
+    library.mkdir()
+
+    manko_packet = {
+        "number": number,
+        "record": {
+            "_id": "fixture_manko_SYN123", "number": number,
+            "title": "Synthetic Manko description kept outside filename projection",
+            "title_display_name": [{"language": "en", "title": number}],
+            "discription": [{"language": "en", "overview": "Synthetic Manko overview"}],
+            "share_date": f"{year}-02-03T00:00:00Z",
+        },
+        "actors": [],
+    }
+    javbus_packet = {
+        "number": number,
+        "record": {
+            "_id": number, "number": number,
+            "title": javbus_title,
+            "discription": [{"language": "en", "overview": "Synthetic JavBus overview"}],
+            "share_date": f"{year}-02-03T00:00:00Z",
+        },
+        "actors": [],
+    }
+
+    class OfflinePacketProvider:
+        def __init__(self, packet):
+            self.packet = packet
+
+        def search(self, found_number):
+            assert found_number == number
+            return deepcopy(self.packet)
+
+        def fetch(self, _identity):
+            return deepcopy(self.packet)
+
+    offline_plugin.init_plugin({
+        "enabled": True,
+        "sources": ["manko", "javbus"],
+        "javbus_api_url": "http://127.0.0.1:9",
+        "storage": "local",
+        "recognize_dirs": str(source.parent),
+        "target_path": str(library),
+        "transfer_type": "link",
+        "handoff_mode": "discover",
+        "image_hosts": [],
+        "actress_subfolder": False,
+    })
+    offline_plugin._provider = OfflinePacketProvider(manko_packet)
+    offline_plugin._providers["javbus"] = OfflinePacketProvider(javbus_packet)
+    assert offline_plugin._manual is not None
+    from app.schemas.types import ChainEventType
+    assert offline_plugin._rename_event_manager is offline_plugin.eventmanager
+    assert offline_plugin._rename_event_type is ChainEventType.TransferRenameBuild
+
+    target_by_source = {}
+    for media_source in ("manko", "javbus"):
+        preview = offline_plugin._manual.preview(ManualPreviewRequest(
+            path=str(source), target_path=str(library), media_source=media_source,
+            transfer_type="link", library_category_folder=False,
+            actress_subfolder=False,
+        ))
+        assert preview.summary.success == 1, preview
+        assert len(preview.items) == 1 and preview.items[0].target
+        target = Path(preview.items[0].target)
+        assert target.parent.parent == library
+        assert not target.exists()
+        target_by_source[media_source] = target
+
+        if media_source == "javbus":
+            # Filename normalization must not erase the title used by preview/NFO metadata.
+            assert preview.items[0].title == javbus_title
+            media = offline_plugin.recognize_media(
+                meta=offline_plugin._manual._meta(source, number),
+                mtype=MediaType.MOVIE,
+                media_source="javbus",
+                cache=False,
+            )
+            assert isinstance(media, MediaInfo)
+            assert media.title == javbus_title
+            assert media.original_title == javbus_title
+            import xml.etree.ElementTree as ET
+            nfo = ET.fromstring(offline_plugin.metadata_nfo(mediainfo=media))
+            assert nfo.findtext("title") == javbus_title
+
+    manko_target = target_by_source["manko"]
+    javbus_target = target_by_source["javbus"]
+    # The same system template renders the Manko number/year form. This expectation
+    # intentionally goes red on current JavBus title-driven naming.
+    assert manko_target.parent.name == f"{number} ({year})"
+    assert manko_target.stem == f"{number}({year})"
+    assert javbus_target == manko_target
+    assert not list(library.rglob("*.nfo"))
 
 
 def test_native_manual_execution_links_renames_and_scrapes_plugin_metadata(

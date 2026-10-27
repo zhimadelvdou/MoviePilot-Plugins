@@ -23,9 +23,10 @@ class ManualPluginAPI:
         return self.workspace.options()
 
     def browse(self, path: str = "", kind: Literal["source", "target"] = "source",
+               show_organized: bool = False,
                _user=Depends(get_current_active_superuser)) -> ManualBrowse:
         try:
-            return self.workspace.browse(path, kind)
+            return self.workspace.browse(path, kind, show_organized=show_organized)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

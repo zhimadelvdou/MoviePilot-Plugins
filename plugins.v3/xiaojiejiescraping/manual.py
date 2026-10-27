@@ -24,6 +24,7 @@ from .diagnostics import capture_query_diagnostics
 
 MAX_SCAN_ENTRIES = 1000
 MAX_VIDEO_FILES = 50
+MAX_BROWSE_STATUS_RECORDS = 10000
 PREVIEW_TTL = 15 * 60
 
 
@@ -42,6 +43,9 @@ class ManualBrowseItem(BaseModel):
     type: str
     modify_time: float | None = None
     size: int | None = None
+    organization_status: str | None = None
+    organized_count: int | None = None
+    video_count: int | None = None
 
 
 class ManualBrowse(BaseModel):
@@ -242,7 +246,212 @@ class ManualTransferWorkspace:
             self._ledger = HandoffLedger(self.data_path / "manual-handoff.sqlite3")
         return self._ledger
 
-    def browse(self, value: str, kind: str) -> ManualBrowse:
+    def _organization_records(self) -> tuple[list[dict], bool]:
+        """读取已核验完成记录；使用账本的只读入口和统一记录上限。"""
+        ledgers: list[tuple[str, Path]] = []
+        manual_path = self.data_path / "manual-handoff.sqlite3"
+        if self._ledger is not None:
+            ledgers.append(("manual", self._ledger.path))
+        else:
+            try:
+                info = manual_path.lstat()
+                if stat_module.S_ISREG(info.st_mode) and not stat_module.S_ISLNK(info.st_mode):
+                    ledgers.append(("manual", manual_path))
+                else:
+                    return [], False
+            except FileNotFoundError:
+                pass
+            except Exception:
+                return [], False
+        auto_ledger = getattr(getattr(self.plugin, "_handoff", None), "ledger", None)
+        if auto_ledger is not None:
+            auto_path = getattr(auto_ledger, "path", None)
+            if auto_path is not None and all(Path(auto_path) != path for _, path in ledgers):
+                ledgers.append(("automatic", Path(auto_path)))
+        if not ledgers:
+            return [], True
+
+        budget_per_ledger = max(1, MAX_BROWSE_STATUS_RECORDS // len(ledgers))
+        records, complete = [], True
+        for kind, path in ledgers:
+            try:
+                rows = HandoffLedger.list_existing_records(
+                    path, ("completed",), limit=budget_per_ledger + 1)
+            except Exception:
+                complete = False
+                continue
+            if len(rows) > budget_per_ledger:
+                complete = False
+                rows = rows[:budget_per_ledger]
+            for record in rows:
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict) or payload.get("completion_scope") != "file_transfer":
+                    continue
+                if kind == "manual" and payload.get("kind") != "manual_file_intent":
+                    continue
+                source_value = payload.get("source") if kind == "manual" else payload.get("path")
+                if not isinstance(source_value, str):
+                    continue
+                try:
+                    source = Path(source_value)
+                    if not source.is_absolute() or ".." in source.parts:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                records.append({"kind": kind, "record": record, "payload": payload, "source": source})
+        return records, complete
+
+    @staticmethod
+    def _verified_automatic_transfer(payload: dict) -> bool:
+        """Recheck the exact source version and current hard link for an auto completion."""
+        try:
+            if payload.get("operation") != "link":
+                return False
+            source = Path(payload["path"])
+            source_stat = source.stat(follow_symlinks=False)
+            if (source.is_symlink() or not stat_module.S_ISREG(source_stat.st_mode)
+                    or str(source.resolve(strict=True)) != payload["real_path"]
+                    or any(getattr(source_stat, attr) != payload[field] for attr, field in (
+                        ("st_dev", "device"), ("st_ino", "inode"),
+                        ("st_size", "size"), ("st_mtime_ns", "mtime_ns")))):
+                return False
+            root = Path(payload.get("actress_root") or payload["target_root"]).resolve(strict=True)
+            target = _target_path(payload.get("preview_target"), root)
+            if target is None or target.is_symlink() or not target.is_file():
+                return False
+            target_stat = target.stat(follow_symlinks=False)
+            return (stat_module.S_ISREG(target_stat.st_mode)
+                    and target_stat.st_dev == source_stat.st_dev
+                    and target_stat.st_ino == source_stat.st_ino
+                    and target_stat.st_size == source_stat.st_size
+                    and target_stat.st_mode == source_stat.st_mode)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+
+    def _organization_record_verified(self, record: dict) -> bool:
+        try:
+            if record["kind"] == "manual":
+                return (self._source_matches(record["payload"])
+                        and self._verify_manual_transfer(record["payload"], record["record"]))
+            return self._verified_automatic_transfer(record["payload"])
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+
+    def _annotate_organized_items(self, actual: Path, items: list[ManualBrowseItem]) -> None:
+        records, history_complete = self._organization_records()
+        if not records and history_complete:
+            return
+        file_items = {Path(item.path): item for item in items if item.type == "file"}
+        directory_items = {Path(item.path): item for item in items if item.type == "dir"}
+        direct_records: dict[Path, list[dict]] = {}
+        directory_records: dict[Path, list[dict]] = {}
+        for record in records:
+            try:
+                relative = record["source"].relative_to(actual)
+            except ValueError:
+                continue
+            if len(relative.parts) == 1 and record["source"] in file_items:
+                direct_records.setdefault(record["source"], []).append(record)
+            elif relative.parts:
+                top_directory = actual / relative.parts[0]
+                if top_directory in directory_items:
+                    directory_records.setdefault(top_directory, []).append(record)
+
+        verified_cache: dict[int, bool] = {}
+
+        def has_verified_record(path: Path, relevant: list[dict]) -> bool:
+            for record in relevant:
+                if record["source"] != path:
+                    continue
+                identity = id(record)
+                if identity not in verified_cache:
+                    verified_cache[identity] = self._organization_record_verified(record)
+                if verified_cache[identity]:
+                    return True
+            return False
+
+        for path, item in file_items.items():
+            relevant = direct_records.get(path, [])
+            if relevant and has_verified_record(path, relevant):
+                item.organization_status = "organized"
+            elif relevant or not history_complete:
+                item.organization_status = "unknown"
+
+        budget = {"entries": 0, "videos": 0, "exhausted": False}
+        for directory, item in directory_items.items():
+            if directory not in directory_records and not history_complete:
+                item.organization_status = "unknown"
+        for directory, relevant in directory_records.items():
+            total_videos = organized_videos = 0
+            scan_complete = history_complete
+            if budget["exhausted"]:
+                directory_items[directory].organization_status = "incomplete"
+                continue
+            try:
+                directory_root = directory.resolve(strict=True)
+                if directory.is_symlink() or not directory_root.is_dir() or directory_root != directory:
+                    scan_complete = False
+                    raise OSError("unsafe directory")
+                pending = [directory_root]
+                while pending and not budget["exhausted"]:
+                    current_path = pending.pop()
+                    try:
+                        with os.scandir(current_path) as children:
+                            for child_entry in children:
+                                budget["entries"] += 1
+                                if budget["entries"] > MAX_SCAN_ENTRIES:
+                                    scan_complete = False
+                                    budget["exhausted"] = True
+                                    break
+                                try:
+                                    if child_entry.is_symlink():
+                                        continue
+                                    child = Path(child_entry.path)
+                                    if child_entry.is_dir(follow_symlinks=False):
+                                        pending.append(child)
+                                        continue
+                                    if (not child_entry.is_file(follow_symlinks=False)
+                                            or child.suffix.lower() not in VIDEO_EXTENSIONS):
+                                        continue
+                                    if budget["videos"] >= MAX_VIDEO_FILES:
+                                        scan_complete = False
+                                        budget["exhausted"] = True
+                                        break
+                                    child_stat = child_entry.stat(follow_symlinks=False)
+                                    resolved = child.resolve(strict=True)
+                                    if (not stat_module.S_ISREG(child_stat.st_mode)
+                                            or not resolved.is_relative_to(directory_root)):
+                                        scan_complete = False
+                                        continue
+                                    budget["videos"] += 1
+                                    total_videos += 1
+                                    if has_verified_record(resolved, relevant):
+                                        organized_videos += 1
+                                except (OSError, RuntimeError, ValueError):
+                                    scan_complete = False
+                    except OSError:
+                        scan_complete = False
+                        break
+            except (OSError, RuntimeError, ValueError):
+                scan_complete = False
+
+            item = directory_items[directory]
+            if scan_complete and total_videos > 0 and organized_videos == total_videos:
+                item.organization_status = "organized"
+                item.organized_count = organized_videos
+                item.video_count = total_videos
+            elif scan_complete and organized_videos > 0:
+                item.organization_status = "partial"
+                item.organized_count = organized_videos
+                item.video_count = total_videos
+            elif organized_videos > 0:
+                item.organization_status = "incomplete"
+                item.organized_count = organized_videos
+                item.video_count = total_videos
+            else:
+                item.organization_status = "unknown"
+
+    def browse(self, value: str, kind: str, show_organized: bool = False) -> ManualBrowse:
         if kind not in ("source", "target"):
             raise ValueError("kind 必须是 source 或 target")
         if not self._active():
@@ -284,6 +493,13 @@ class ManualTransferWorkspace:
         except OSError as exc:
             raise ValueError("无法读取该目录") from exc
         parent = str(actual.parent) if actual != Path("/") else None
+        if kind == "source" and show_organized is True:
+            try:
+                self._annotate_organized_items(actual, items)
+            except Exception:
+                for item in items:
+                    if item.type in ("file", "dir") and item.organization_status is None:
+                        item.organization_status = "unknown"
         return ManualBrowse(path=str(actual), parent=parent, items=items)
 
     @staticmethod

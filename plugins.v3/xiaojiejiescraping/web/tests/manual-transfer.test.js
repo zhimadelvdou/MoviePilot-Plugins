@@ -278,7 +278,7 @@ describe('manual transfer page', () => {
       if (url === 'plugin/plugin-x') return { success: true, message: '', data: { ...initialPluginConfig } }
       if (url === 'download/clients') return { success: true, message: '', data: [] }
       if (url.endsWith('/manual/browse')) {
-        if (request.params.path === '/downloads') return { path: '/downloads', parent: '/', items: [{ name: 'New source', path: '/downloads/New source', type: 'dir' }] }
+        if (request.params.path === '/downloads') return { path: '/downloads', parent: '/', items: [{ name: 'New source', path: '/downloads/New source', type: 'dir', organization_status: 'organized' }] }
         return { path: request.params.path, parent: '/downloads', items: [] }
       }
       return {}
@@ -288,6 +288,8 @@ describe('manual transfer page', () => {
     await flushPromises()
     const item = document.body.querySelector('[data-testid="browse-item"]')
     expect(item).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="organization-status"]')).toBeNull()
+    expect(api.get).toHaveBeenCalledWith('plugin/plugin-x/manual/browse', { params: { path: '/downloads', kind: 'source' } })
     item.click()
     await flushPromises()
     expect(document.body.querySelector('input[readonly]')?.value).toBe('/downloads/New source')
@@ -638,8 +640,25 @@ describe('manual transfer page', () => {
     await flushPromises()
     await document.body.querySelector('[data-testid="browse-item"]')?.click()
     await flushPromises()
-    expect(api.get).toHaveBeenCalledWith('plugin/plugin-x/manual/browse', { params: { path: '/downloads/Season 1', kind: 'source' } })
+    expect(api.get).toHaveBeenCalledWith('plugin/plugin-x/manual/browse', { params: { path: '/downloads/Season 1', kind: 'source', show_organized: true } })
     expect(inputFor(wrapper, 'source-path').element.value).toBe('')
+  })
+
+  it('shows only manual source organization status and keeps the row selectable', async () => {
+    const { api, wrapper } = setup()
+    api.get.mockImplementation(async (url, request) => url.endsWith('/options') ? options : ({
+      path: request.params.path, parent: '/', items: [{ name: 'Done.mkv', path: '/downloads/Done.mkv', type: 'file', organization_status: 'organized' }],
+    }))
+    await flushPromises()
+    await wrapper.get('[data-testid="browse-source"]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-testid="organization-status"]')?.textContent).toContain('已整理')
+    expect(api.get.mock.calls.find(([url]) => url.endsWith('/manual/browse'))[1].params).toEqual({
+      path: '/downloads', kind: 'source', show_organized: true,
+    })
+    await document.body.querySelector('[data-testid="browse-item"]').click()
+    await flushPromises()
+    expect(inputFor(wrapper, 'source-path').element.value).toBe('/downloads/Done.mkv')
   })
 
   it('allows path edits during preview and rejects the old response after its request generation changes', async () => {

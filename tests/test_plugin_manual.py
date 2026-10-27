@@ -16,6 +16,7 @@ from app.api.endpoints.plugin import get_current_active_superuser
 
 from app.plugins.xiaojiejiescraping import XiaojiejieScraping
 from app.plugins.xiaojiejiescraping.manual import ManualBrowseItem, ManualPreviewRequest, ManualTransferWorkspace
+from app.plugins.xiaojiejiescraping.ledger import HandoffLedger
 from app.plugins.xiaojiejiescraping.manual_api import api_routes
 
 
@@ -410,6 +411,181 @@ def test_manual_browse_returns_metadata_for_allowed_items_and_keeps_legacy_model
     legacy_item = ManualBrowseItem.model_validate({"name": "legacy.mp4", "path": "/legacy.mp4", "type": "file"})
     assert legacy_item.modify_time is None
     assert legacy_item.size is None
+    assert legacy_item.organization_status is None
+
+
+def _complete_manual_hardlink(workspace, target, source):
+    original_transfer = workspace.transfer
+
+    def transfer(**kwargs):
+        result = original_transfer(**kwargs)
+        if not kwargs.get("preview"):
+            destination = Path(kwargs["target_path"]) / Path(kwargs["fileitem"].path).name
+            os.link(kwargs["fileitem"].path, destination)
+        return result
+
+    workspace.transfer = transfer
+    try:
+        preview = workspace.preview(ManualPreviewRequest(
+            path=str(source), target_path=str(target), media_source="manko",
+        ))
+        response = workspace.execute(preview.preview_id)
+        assert response.state == "completed"
+    finally:
+        workspace.transfer = original_transfer
+    return target / Path(source).name
+
+
+def test_manual_browse_status_is_opt_in_read_only_and_does_not_create_missing_ledger(
+        manual_workspace, tmp_path):
+    _, workspace, root, target, _, _ = manual_workspace
+    data_path = tmp_path / "missing-data"
+    workspace = ManualTransferWorkspace(workspace.plugin, data_path)
+
+    source = workspace.browse(str(root), "source", show_organized=True)
+    target_listing = workspace.browse(str(target), "target", show_organized=True)
+
+    assert data_path.exists() is False
+    assert all(item.organization_status is None for item in source.items)
+    assert all(item.organization_status is None for item in target_listing.items)
+
+
+def test_manual_browse_marks_only_currently_verified_hardlink(manual_workspace):
+    _, workspace, root, target, source, _ = manual_workspace
+    destination = _complete_manual_hardlink(workspace, target, source)
+
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    item = next(item for item in listing.items if item.path == str(source))
+    assert item.organization_status == "organized"
+
+    destination.unlink()
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    item = next(item for item in listing.items if item.path == str(source))
+    assert item.organization_status == "unknown"
+
+
+def test_manual_browse_does_not_trust_hardlink_after_source_version_changes(manual_workspace):
+    _, workspace, root, target, source, _ = manual_workspace
+    destination = _complete_manual_hardlink(workspace, target, source)
+    source.write_bytes(b"changed version on both hardlink names")
+    assert destination.stat().st_ino == source.stat().st_ino
+
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    item = next(item for item in listing.items if item.path == str(source))
+    assert item.organization_status == "unknown"
+
+
+def test_manual_browse_directory_summarizes_verified_partial_then_complete(manual_workspace):
+    _, workspace, root, target, _, _ = manual_workspace
+    batch = root / "batch"
+    batch.mkdir()
+    first, second = batch / "TEST-456.mkv", batch / "TEST-789.mp4"
+    first.write_bytes(b"first synthetic video")
+    second.write_bytes(b"second synthetic video")
+
+    _complete_manual_hardlink(workspace, target, first)
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    folder = next(item for item in listing.items if item.path == str(batch))
+    assert folder.organization_status == "partial"
+    assert (folder.organized_count, folder.video_count) == (1, 2)
+
+    _complete_manual_hardlink(workspace, target, second)
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    folder = next(item for item in listing.items if item.path == str(batch))
+    assert folder.organization_status == "organized"
+    assert (folder.organized_count, folder.video_count) == (2, 2)
+
+
+def test_manual_browse_directory_budget_degrades_to_unknown_or_incomplete(
+        manual_workspace, monkeypatch):
+    from app.plugins.xiaojiejiescraping import manual as manual_module
+
+    _, workspace, root, target, _, _ = manual_workspace
+    batch = root / "batch"
+    batch.mkdir()
+    source = batch / "TEST-456.mkv"
+    source.write_bytes(b"synthetic video")
+    (batch / "TEST-789.mkv").write_bytes(b"another video")
+    (batch / "notes.txt").write_text("not a video", encoding="utf-8")
+    _complete_manual_hardlink(workspace, target, source)
+    monkeypatch.setattr(manual_module, "MAX_SCAN_ENTRIES", 2)
+
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    folder = next(item for item in listing.items if item.path == str(batch))
+    assert folder.organization_status in ("unknown", "incomplete")
+
+
+def test_manual_browse_query_and_scan_errors_do_not_break_listing(manual_workspace, monkeypatch):
+    _, workspace, root, target, source, _ = manual_workspace
+    _complete_manual_hardlink(workspace, target, source)
+
+    def fail_readonly(*_args, **_kwargs):
+        raise OSError("synthetic readonly error")
+
+    monkeypatch.setattr(HandoffLedger, "list_existing_records", fail_readonly)
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    assert any(item.path == str(source) for item in listing.items)
+
+
+def test_manual_browse_scan_error_marks_relevant_directory_incomplete(manual_workspace, monkeypatch):
+    _, workspace, root, target, _, _ = manual_workspace
+    batch = root / "batch"
+    batch.mkdir()
+    source = batch / "TEST-456.mkv"
+    source.write_bytes(b"synthetic video")
+    _complete_manual_hardlink(workspace, target, source)
+    from app.plugins.xiaojiejiescraping import manual as manual_module
+    real_scandir = os.scandir
+
+    def fail_batch_scandir(path="."):
+        if Path(path) == batch:
+            raise OSError("synthetic scan error")
+        return real_scandir(path)
+
+    monkeypatch.setattr(manual_module.os, "scandir", fail_batch_scandir)
+
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    folder = next(item for item in listing.items if item.path == str(batch))
+    assert folder.organization_status in ("unknown", "incomplete")
+
+
+def test_manual_browse_malformed_completion_payload_is_safe(manual_workspace):
+    _, workspace, root, target, source, _ = manual_workspace
+    ledger = HandoffLedger(workspace.data_path / "manual-handoff.sqlite3")
+    key = "c" * 64
+    ledger.claim(key, {"kind": "manual_file_intent", "completion_scope": "file_transfer",
+                       "source": str(source)})
+    assert ledger.transition(key, ("claimed",), "completed", {"completion_scope": "file_transfer"})
+
+    listing = workspace.browse(str(root), "source", show_organized=True)
+    item = next(item for item in listing.items if item.path == str(source))
+    assert item.organization_status == "unknown"
+
+
+def test_automatic_completed_hardlink_can_mark_source_but_copy_cannot(manual_workspace, tmp_path):
+    plugin, workspace, root, target, source, _ = manual_workspace
+    for operation in ("link", "copy"):
+        destination = target / f"{operation}-{source.name}"
+        if operation == "link":
+            os.link(source, destination)
+        else:
+            import shutil
+            shutil.copy2(source, destination)
+        source_stat = source.stat()
+        ledger = HandoffLedger(tmp_path / f"{operation}-auto.sqlite3")
+        key = ("a" if operation == "link" else "b") * 64
+        ledger.claim(key, {
+            "path": str(source), "source_storage": "local", "real_path": str(source.resolve()),
+            "target_root": str(target), "preview_target": str(destination), "operation": operation,
+            "size": source_stat.st_size, "mtime_ns": source_stat.st_mtime_ns,
+            "device": source_stat.st_dev, "inode": source_stat.st_ino,
+        })
+        assert ledger.transition(key, ("claimed",), "completed", {"completion_scope": "file_transfer"})
+        plugin._handoff = SimpleNamespace(config=SimpleNamespace(target_path=str(target)), ledger=ledger)
+        listing = workspace.browse(str(root), "source", show_organized=True)
+        item = next(item for item in listing.items if item.path == str(source))
+        assert item.organization_status == ("organized" if operation == "link" else "unknown")
+        destination.unlink()
 
 
 @pytest.mark.parametrize("path", ["../outside/TEST-123.mkv"])

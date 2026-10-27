@@ -42,6 +42,24 @@ def test_claim_persists_full_record_and_returns_independent_copies(tmp_path, mon
     assert path.read_bytes().startswith(b"SQLite format 3\x00")
 
 
+def test_read_existing_records_is_read_only_and_never_creates_missing_ledger(tmp_path):
+    missing = tmp_path / "missing" / "ledger.sqlite3"
+    with pytest.raises(ledger.HandoffLedgerError):
+        ledger.HandoffLedger.list_existing_records(missing, ("completed",))
+    assert not missing.parent.exists()
+
+    path = tmp_path / "ledger.sqlite3"
+    store = ledger.HandoffLedger(path)
+    store.claim("complete", {"kind": "fixture"})
+    assert store.transition("complete", ("claimed",), "completed", {"completion_scope": "file_transfer"})
+    before_bytes, before_mtime = path.read_bytes(), path.stat().st_mtime_ns
+    rows = ledger.HandoffLedger.list_existing_records(path, ("completed",), limit=10001)
+    assert [row["key"] for row in rows] == ["complete"]
+    assert rows[0]["payload"]["completion_scope"] == "file_transfer"
+    assert path.read_bytes() == before_bytes
+    assert path.stat().st_mtime_ns == before_mtime
+
+
 def test_task_key_uses_stable_canonical_json():
     first = {"path": "/合成/TEST-123.mkv", "intent": {"b": [2, 1], "a": True}}
     second = {"intent": {"a": True, "b": [2, 1]}, "path": "/合成/TEST-123.mkv"}

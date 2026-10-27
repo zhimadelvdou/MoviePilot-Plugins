@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -322,3 +323,43 @@ class HandoffLedger:
                 (*parameters, limit),
             )
             return [_decode(row) for row in rows]
+
+    @staticmethod
+    def list_existing_records(path: str | Path, states: tuple[str, ...] | None = None,
+                              limit: int = 100) -> list[dict]:
+        """只读列出已存在账本；不创建路径/数据库，供旁路状态摘要使用。"""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 10001:
+            raise LedgerValidationError("只读查询数量超出允许范围")
+        if states is not None:
+            _check_states(states)
+        try:
+            target = Path(path).expanduser()
+            info = target.lstat()
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise HandoffLedgerError("只读账本路径不是普通文件")
+            target = target.resolve(strict=True)
+            if states == () or limit == 0:
+                return []
+            connection = sqlite3.connect(target.as_uri() + "?mode=ro", uri=True,
+                                         timeout=10, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("BEGIN")
+                _check_schema(connection)
+                parameters = list(states or ())
+                where = " WHERE state IN (" + ",".join("?" for _ in parameters) + ")" if states else ""
+                rows = connection.execute(
+                    "SELECT * FROM handoff_records" + where + " ORDER BY created_at, key LIMIT ?",
+                    (*parameters, limit),
+                )
+                records = [_decode(row) for row in rows]
+                connection.commit()
+                return records
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+        except HandoffLedgerError:
+            raise
+        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+            raise HandoffLedgerError("只读账本查询失败") from exc

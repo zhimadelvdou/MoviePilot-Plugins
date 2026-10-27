@@ -237,7 +237,9 @@ async function loadBrowse(path = browsePath.value) {
   if (formLocked.value) return
   error.value = ''
   try {
-    const result = await props.api.get(endpoint('browse'), { params: { path, kind: browseKind.value } })
+    const params = { path, kind: browseKind.value }
+    if (browsePurpose.value === 'manual' && browseKind.value === 'source') params.show_organized = true
+    const result = await props.api.get(endpoint('browse'), { params })
     browsePath.value = result.path || path
     parentPath.value = result.parent || ''
     browseItems.value = result.items || []
@@ -260,6 +262,15 @@ function chooseCurrentDirectory() {
   } else if (browsePurpose.value === 'automatic') automaticRules.value.target_path = browsePath.value
   else setPath(browseKind.value, browsePath.value)
   browser.value = false
+}
+function organizationStatusText(item) {
+  if (item.organization_status === 'organized') return '已整理'
+  if (item.organization_status === 'partial') return `部分已整理 ${item.organized_count}/${item.video_count}`
+  if (item.organization_status === 'incomplete') {
+    return item.organized_count ? `已整理 ≥${item.organized_count} 项` : '状态未知'
+  }
+  if (item.organization_status === 'unknown') return '状态未知'
+  return ''
 }
 async function createPreview() {
   if (!options.value?.enabled || !sourcePath.value || !targetPath.value || !mediaSource.value || formLocked.value || previewBusy.value) return
@@ -529,7 +540,7 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <VSelect data-testid="browse-sort" class="browse-sort" label="排序方式" density="compact" hide-details :items="browseSortItems" item-title="title" item-value="value" :model-value="browseSort" :disabled="formLocked || (browsePurpose === 'automatic' && automaticRulesBusy)" @update:model-value="browseSort = $event" />
         <div class="browse-navigation"><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !parentPath" @click="loadBrowse(parentPath)">返回上级目录</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy" @click="loadBrowse('/')">从根目录浏览</VBtn><VBtn variant="tonal" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="loadBrowse()">刷新当前目录</VBtn></div>
       </div>
-      <VList density="compact"><VListItem v-for="item in sortedBrowseItems" :key="item.path" class="browse-item" :title="item.name" :subtitle="item.path" :disabled="browsePurpose === 'automatic' && browseKind === 'source' && item.type !== 'dir' && item.type !== 'directory'" data-testid="browse-item" @click="chooseItem(item)" /></VList>
+      <VList density="compact"><VListItem v-for="item in sortedBrowseItems" :key="item.path" class="browse-item" :title="item.name" :subtitle="item.path" :disabled="browsePurpose === 'automatic' && browseKind === 'source' && item.type !== 'dir' && item.type !== 'directory'" data-testid="browse-item" @click="chooseItem(item)"><template #append><VChip v-if="browsePurpose === 'manual' && browseKind === 'source' && organizationStatusText(item)" :title="item.organization_status === 'incomplete' ? '目录检查不完整，不能认定全部已整理' : ''" data-testid="organization-status" size="small" variant="tonal">{{ organizationStatusText(item) }}</VChip></template></VListItem></VList>
     </VCardText><VCardActions><VSpacer/><VBtn variant="text" @click="browser = false">取消</VBtn><VBtn data-testid="choose-browse-directory" color="primary" :disabled="formLocked || automaticRulesBusy || !browsePath" @click="chooseCurrentDirectory">{{ browsePurpose === 'automatic' && browseKind === 'source' ? '追加此来源目录' : '选择此目录' }}</VBtn></VCardActions></VCard></VDialog>
     </VContainer>
   </main>

@@ -1,9 +1,9 @@
 {
   "XiaojiejieScraping": {
     "name": "Xiaojiejie-Scraping",
-    "description": "直连多来源刮削：插件独立手动整理页、qBittorrent 标签/目录触发、预览与安全持久原生交接",
+    "description": "直连多来源刮削：插件独立手动整理页、qBittorrent 分类/标签/目录触发、预览与安全持久原生交接",
     "labels": "识别,刮削",
-    "version": "0.8.13",
+    "version": "0.8.14",
     "icon": "",
     "author": "zhimadelvdou（基于 hyuan280 方案重写）",
     "level": 1,
@@ -11,6 +11,7 @@
     "release": true,
     "system_version": ">=3.1.1,<4",
     "history": {
+      "v0.8.14": "新增独立qBittorrent分类匹配；fresh raw行在发现、入队和执行边界复核，分类值纳入新任务边界；旧tag/path模式与旧配置保持不变",
       "v0.8.13": "JavBus搜索及详情展示使用限时签名图片路由；samples.src限量采集，原生metadata_img仍使用原始URL，旧JavBus缓存使用独立artwork-v1命名空间",
       "v0.8.12": "按来源证据选择女主演：JavBus stars 提供安全女优目录候选；Manko 原始 avdbs_actor 标记逻辑保持不变，缺少匹配来源证据时失败关闭",
       "v0.8.11": "JavBus 详情切换为用户配置的 API JSON 基址直连；默认留空并保留 Manko 来源选择，校验响应身份与结构，不生成可信女优标记",

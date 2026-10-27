@@ -2,7 +2,9 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.13 延续 0.8.12 的女主演证据规则，并在 JavBus 详情数据中按顺序提取最多 8 个去重 HTTPS `samples[].src` 图片候选。手动搜索/详情展示时，JavBus 封面和背景字段可使用限时签名的同源图片路由；路由只允许当前 `image_hosts` 已批准的 JavBus 封面/样图及 DMM 视频样图 URL，固定发送 JavBus 根页 Referer，不接收账号 Cookie，并限制响应大小、图片 MIME 和解码尺寸。签名 URL 签发有效期为 1 小时，插件配置重载即失效。该路由只服务搜索和详情展示；`metadata_img` 仍按既有合同返回原始上游 HTTPS URL，由 MoviePilot 原生下载，宿主下载是否成功仍取决于宿主访问条件，未在此版本承诺。完整演员 cast、女优来源证据、NFO 与自动整理边界不变。JavBus JSON API 继续使用单独配置的基址，默认留空；须显式选择来源才参与识别。API 与图片代理验证不代表完整刮削、整理或部署验收；自动整理保持默认关闭、默认只读发现。
+这是开发版本。0.8.14 延续 0.8.13 行为，新增独立 qBittorrent 分类筛选模式：仅当任务标准 `category` 与新增 `torrent_category` 精确匹配时参与；该模式不读取或转换 `torrent_tag`。既有 tag/path/OR/AND 模式语义与旧配置保持不变，不自动迁移旧设置。分类模式复用下载器映射的任务路径和完整公开文件清单，并在发现、入队和执行边界重新核验原始分类；分类配置改变会重设仅处理新任务的启动边界，需另行有界处理旧完成任务。
+
+0.8.13 延续 0.8.12 的女主演证据规则，并在 JavBus 详情数据中按顺序提取最多 8 个去重 HTTPS `samples[].src` 图片候选。手动搜索/详情展示时，JavBus 封面和背景字段可使用限时签名的同源图片路由；路由只允许当前 `image_hosts` 已批准的 JavBus 封面/样图及 DMM 视频样图 URL，固定发送 JavBus 根页 Referer，不接收账号 Cookie，并限制响应大小、图片 MIME 和解码尺寸。签名 URL 签发有效期为 1 小时，插件配置重载即失效。该路由只服务搜索和详情展示；`metadata_img` 仍按既有合同返回原始上游 HTTPS URL，由 MoviePilot 原生下载，宿主下载是否成功仍取决于宿主访问条件，未在此版本承诺。完整演员 cast、女优来源证据、NFO 与自动整理边界不变。JavBus JSON API 继续使用单独配置的基址，默认留空；须显式选择来源才参与识别。API 与图片代理验证不代表完整刮削、整理或部署验收；自动整理保持默认关闭、默认只读发现。
 
 ## 功能与边界
 
@@ -10,7 +12,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 - 演员缩略图：可选 GFriends 官方公开索引，写入 NFO 的远程 thumb；插件不下载头像
 - 原生手动入口：注册来源列表及同步/异步搜索、识别、图片、NFO 方法，供 MoviePilot 手动整理和刮削调用
 - 插件独立手动页：从本地文件系统选源文件/目录和既有目标，指定已启用来源后预览并明确提交硬链接整理；可选按女主演分目录，自动识别目录只作快捷参考
-- 自动入口：qBittorrent 已完成任务按 tag、path、tag_or_path 或 tag_and_path 选择；tag-only 使用 MoviePilot 映射任务路径，不从原始下载路径拼接候选
+- 自动入口：qBittorrent 已完成任务按分类、tag、path、tag_or_path 或 tag_and_path 选择；分类为独立精确匹配，既有 tag/path 规则不变。候选仍要求映射任务路径、完整公开文件清单、有效完成状态和新任务边界
 - 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
 - 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
 
@@ -147,6 +149,8 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 示例：`Xiaojiejie-Scraping diagnostic source=manko operation=search reason=http_error http_status=403`。每行仅包含固定词表和有限整数，不包含番号、原生 ID、搜索词、完整 URL/参数、代理地址、请求头、Cookie、响应正文、异常文本、标题或文件路径。SDK 未提供状态时省略该字段；诊断不增加请求或自动重试、不改变匹配与访问边界，也不绕过访问门槛。并发查询应结合日志时间和阶段阅读，不能把其它查询的相邻行当成同一个请求的证据。
 
 ## 测试、版本与许可
+
+0.8.14 新增独立 `category` 自动匹配模式及 `torrent_category` 配置。qBittorrent 列表投影分类和 fresh raw completion row 均须精确匹配配置值；分类模式将 `tag=None` 传给文件候选筛选，并用已映射任务路径建立安全 task root。tag-only 仍使用 MoviePilot 映射任务路径，不从 raw `save_path` 拼接候选。完整公开文件清单继续用于 ownership 验证；同文件系统约束、原生监控重叠、source identity/女优校验及 `auto_new_only` 仍由既有路径负责。每次筛选、入队和执行回调都会重新读取 raw row 并复核分类。旧配置和原四种匹配语义不自动转换；只有 category 模式把 `torrent_category` 纳入 scope signature，切换到分类模式或修改分类值会重新建立新任务边界。边界重置前已完成的任务须单独有界处理，不应为重试而关闭 `auto_new_only`。本地实现不代表已部署或真实整理链验收。
 
 0.8.13 为 JavBus 的搜索/详情 `MediaInfo` 图片字段增加签名代理：`samples[].src` 按来源顺序筛选为最多 8 个不同 HTTPS 候选，封面相同项不作为背景；缺失或损坏样图不影响其它元数据或女优证据。图片路由要求当前启用 JavBus、当前 allowlist 保留精确图片主机、签名未过期且与配置代际一致；只接受受限路径，使用固定根 Referer、禁止重定向、8 秒请求超时和 8 MiB 上限，并校验 MIME、真实解码格式和尺寸。搜索及详情展示字段使用同源限时 URL，签名不含 MoviePilot API token。缓存使用独立 `artwork-v1` JavBus 命名空间，旧缓存保留但不作为新版本样图命中。`metadata_img` 和 NFO 仍使用原始投影及现有 `image_hosts` 规则，因此本次代理不保证 MoviePilot 原生图片下载，也不构成完整刮削或整理验收。
 

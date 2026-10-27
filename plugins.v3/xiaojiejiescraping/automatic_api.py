@@ -22,6 +22,7 @@ class AutomaticStatus(BaseModel):
     last_poll_at: float | None = None
     counts: dict[str, int]
     pending_actress_choices: list[dict[str, str]] = []
+    torrent_category: str = ""
     error: str | None = None
 
 

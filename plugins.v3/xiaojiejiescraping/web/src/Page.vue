@@ -42,7 +42,7 @@ const automaticCheckBusy = ref(false)
 const automaticCheckMessage = ref('')
 const automaticToggleBusy = ref(false)
 const automaticToggleMessage = ref('')
-const automaticRules = ref({ automatic_match_mode: 'tag_and_path', downloader: '', torrent_tag: '', recognize_dirs: '', target_path: '' })
+const automaticRules = ref({ automatic_match_mode: 'tag_and_path', downloader: '', torrent_tag: '', torrent_category: '', recognize_dirs: '', target_path: '' })
 const automaticDownloaders = ref([])
 const automaticRulesBusy = ref(false)
 const automaticRulesMessage = ref('')
@@ -116,6 +116,7 @@ const automaticRulesCanSave = computed(() => {
   const rules = automaticRules.value
   const hasTag = !!rules.downloader && !!rules.torrent_tag.trim()
   const hasPath = !!rules.downloader && !!rules.recognize_dirs.trim()
+  if (rules.automatic_match_mode === 'category') return !!rules.downloader && !!rules.torrent_category.trim()
   if (rules.automatic_match_mode === 'tag') return hasTag
   if (rules.automatic_match_mode === 'path') return hasPath
   if (rules.automatic_match_mode === 'tag_or_path') return hasTag || hasPath
@@ -126,7 +127,7 @@ const automaticStatusLabel = computed(() => {
   return automaticStatus.value.enabled ? '已开启' : '已关闭'
 })
 const automaticMatchModeLabel = computed(() => ({
-  tag: '按标签', path: '按路径', tag_or_path: '标签或路径', tag_and_path: '标签且路径',
+  tag: '按标签', path: '按路径', tag_or_path: '标签或路径', tag_and_path: '标签且路径', category: '按下载器分类',
 }[automaticStatus.value?.match_mode] || '状态未返回'))
 const storageKey = () => `xiaojiejiescraping:manual-pending:${props.pluginId}`
 const automaticModeLabel = computed(() => {
@@ -378,9 +379,10 @@ async function loadAutomaticRules() {
   try {
     const config = pluginConfigEnvelope(await props.api.get(pluginConfigEndpoint()))
     automaticRules.value = {
-      automatic_match_mode: ['tag', 'path', 'tag_or_path', 'tag_and_path'].includes(config.automatic_match_mode) ? config.automatic_match_mode : 'tag_and_path',
+      automatic_match_mode: ['tag', 'path', 'tag_or_path', 'tag_and_path', 'category'].includes(config.automatic_match_mode) ? config.automatic_match_mode : 'tag_and_path',
       downloader: typeof config.downloader === 'string' ? config.downloader : '',
       torrent_tag: typeof config.torrent_tag === 'string' ? config.torrent_tag : '',
+      torrent_category: typeof config.torrent_category === 'string' ? config.torrent_category : '',
       recognize_dirs: typeof config.recognize_dirs === 'string' ? config.recognize_dirs : '',
       target_path: typeof config.target_path === 'string' ? config.target_path : '',
     }
@@ -400,7 +402,8 @@ async function saveAutomaticRules() {
       ...current,
       automatic_match_mode: automaticRules.value.automatic_match_mode,
       downloader: automaticRules.value.downloader,
-      torrent_tag: automaticRules.value.torrent_tag,
+      torrent_tag: automaticRules.value.automatic_match_mode === 'category' ? current.torrent_tag : automaticRules.value.torrent_tag,
+      torrent_category: automaticRules.value.torrent_category,
       recognize_dirs: automaticRules.value.recognize_dirs,
       target_path: automaticRules.value.target_path,
     }
@@ -408,7 +411,8 @@ async function saveAutomaticRules() {
     if (!response || response.success !== true) throw new Error('plugin config update failed')
     const saved = pluginConfigEnvelope(await props.api.get(pluginConfigEndpoint()))
     if (saved.automatic_match_mode !== updated.automatic_match_mode || saved.downloader !== updated.downloader
-      || saved.torrent_tag !== updated.torrent_tag || saved.recognize_dirs !== updated.recognize_dirs
+      || saved.torrent_tag !== updated.torrent_tag || saved.torrent_category !== updated.torrent_category
+      || saved.recognize_dirs !== updated.recognize_dirs
       || saved.target_path !== updated.target_path) throw new Error('plugin config readback mismatch')
     automaticRulesMessage.value = '自动规则已保存；自动触发开关保持原状态。'
     await loadAutomaticStatus()
@@ -469,7 +473,7 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <template v-else>
           <VAlert class="mb-2" density="compact" type="info" variant="tonal">{{ automaticModeLabel }} · {{ automaticStatus.armed ? '已启动' : '未启动' }}<span v-if="automaticStatus.started_at"> · 启动于 {{ formatAutomaticTime(automaticStatus.started_at) }}</span></VAlert>
           <p>{{ automaticStatus.new_only ? '仅处理启用后完成的下载；历史完成任务跳过。' : '会包含启用前已完成的旧任务。' }}</p>
-          <dl class="automatic-details"><dt>匹配方式</dt><dd>{{ automaticMatchModeLabel }}</dd><dt>下载器 / 标签</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.torrent_tag || '未设置' }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>来源目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
+          <dl class="automatic-details"><dt>匹配方式</dt><dd>{{ automaticMatchModeLabel }}</dd><dt>{{ automaticStatus.match_mode === 'category' ? '下载器 / 分类' : '下载器 / 标签' }}</dt><dd>{{ automaticStatus.downloader || '未设置' }} / {{ automaticStatus.match_mode === 'category' ? (automaticStatus.torrent_category || '未设置') : (automaticStatus.torrent_tag || '未设置') }}</dd><dt>轮询</dt><dd>每 {{ automaticStatus.interval_seconds || 300 }} 秒；上次检查 {{ formatAutomaticTime(automaticStatus.last_poll_at) }}</dd><dt>来源目录</dt><dd>{{ automaticStatus.roots?.join('、') || '未设置' }}</dd><dt>目标目录</dt><dd>{{ automaticStatus.target_path || '未设置' }}</dd></dl>
           <p v-if="automaticCounts.length">计数：<VChip v-for="([key, value]) in automaticCounts" :key="key" class="ma-1" size="x-small" variant="tonal">{{ key }} {{ value }}</VChip></p>
           <VAlert v-for="pending in (automaticStatus.pending_actress_choices || [])" :key="pending.path" density="compact" type="warning" variant="tonal">待人工选择女主演：{{ pending.path }}。请在下方手动整理中选择该源并重新预览；自动流程不会重试。</VAlert>
           <VAlert v-if="automaticStatus.error" density="compact" type="error" variant="tonal">{{ automaticStatus.error }}</VAlert>
@@ -478,11 +482,13 @@ onUnmounted(() => { clearInterval(clockTimer); requestGeneration += 1 })
         <VAlert v-if="automaticCheckMessage" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticCheckMessage }}</VAlert><VAlert v-if="automaticToggleMessage" data-testid="automatic-toggle-message" class="mt-2" density="compact" type="info" variant="tonal">{{ automaticToggleMessage }}</VAlert>
         <VDivider class="my-4" />
         <h2 class="text-h6 mb-2">自动匹配规则</h2><p class="text-body-2">来源路径使用 MoviePilot 文件管理中可见的本地路径。硬链接要求来源与目标位于同一文件系统；不满足时会明确报错，不会改为复制。</p>
+        <VAlert v-if="automaticRules.automatic_match_mode === 'category'" class="mb-2" density="compact" type="info" variant="tonal">下载器分类不是标签，分类值必须精确匹配；来源路径需在 MoviePilot 可见。每项任务的来源与目标目录由后端映射并核对任务清单。</VAlert>
         <div class="automatic-rule-groups">
           <div class="automatic-rule-match-grid">
-            <VSelect data-testid="automatic-match-mode" label="匹配方式" :items="[{title:'按专用标签',value:'tag'},{title:'按来源路径',value:'path'},{title:'任一满足（标签或路径）',value:'tag_or_path'},{title:'同时满足（标签且路径）',value:'tag_and_path'}]" item-title="title" item-value="value" :model-value="automaticRules.automatic_match_mode" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.automatic_match_mode = $event" />
+            <VSelect data-testid="automatic-match-mode" label="匹配方式" :items="[{title:'按专用标签',value:'tag'},{title:'按来源路径',value:'path'},{title:'任一满足（标签或路径）',value:'tag_or_path'},{title:'同时满足（标签且路径）',value:'tag_and_path'},{title:'按下载器分类',value:'category'}]" item-title="title" item-value="value" :model-value="automaticRules.automatic_match_mode" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.automatic_match_mode = $event" />
             <VSelect data-testid="automatic-downloader" label="qBittorrent 下载器" :items="automaticDownloaderItems" item-title="title" item-value="value" :model-value="automaticRules.downloader" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.downloader = $event" />
-            <VTextField data-testid="automatic-tag" label="专用标签" placeholder="如 Manko" :model-value="automaticRules.torrent_tag" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_tag = $event" />
+            <VTextField v-if="automaticRules.automatic_match_mode === 'category'" data-testid="automatic-category" label="下载器分类" placeholder="AV" :model-value="automaticRules.torrent_category" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_category = $event" />
+            <VTextField v-else data-testid="automatic-tag" label="专用标签" placeholder="如 Manko" :model-value="automaticRules.torrent_tag" :disabled="automaticRulesDisabled" @update:model-value="automaticRules.torrent_tag = $event" />
           </div>
           <div class="automatic-rule-path-grid">
             <div class="automatic-rule-path-control">

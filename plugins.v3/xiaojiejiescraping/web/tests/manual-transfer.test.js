@@ -8,7 +8,7 @@ import Config from '../src/Config.vue'
 const goodPreview = { preview_id: 'p1', expires_at: 4070908800, items: [{ source: '/src/a.mp4', target: '/dst/a.mp4', title: '影片', media_source: 'manko', media_id: 'ID-123', success: true, message: 'ok' }], summary: { total: 1, success: 1, failed: 0 } }
 const options = { sources: [{ title: 'Manko', value: 'manko' }], roots: ['/downloads'], default_target_path: '/library', transfer_type: 'link', enabled: true }
 const automaticStatus = { enabled: false, mode: 'discover', match_mode: 'tag_and_path', new_only: true, armed: false, started_at: null, interval_seconds: 300, downloader: 'qb', torrent_tag: 'Manko', roots: ['/downloads'], target_path: '/library', last_poll_at: null, counts: {}, error: '' }
-const initialPluginConfig = { enabled: true, discovery_enabled: false, auto_new_only: true, automatic_match_mode: 'tag_and_path', downloader: 'qb', torrent_tag: 'Manko', recognize_dirs: '/downloads', target_path: '/library', handoff_mode: 'execute', ownership_ack: true, auxiliary_ack: true, future_setting: { retained: true } }
+const initialPluginConfig = { enabled: true, discovery_enabled: false, auto_new_only: true, automatic_match_mode: 'tag_and_path', downloader: 'qb', torrent_tag: 'Manko', torrent_category: '', recognize_dirs: '/downloads', target_path: '/library', handoff_mode: 'execute', ownership_ack: true, auxiliary_ack: true, future_setting: { retained: true } }
 const mounted = []
 const vuetifyOptions = () => ({ attachTo: document.body, global: { plugins: [createVuetify({ components: vuetifyComponents, theme: { defaultTheme: 'dark' }, defaults: { VDialog: { transition: false }, VSelect: { transition: false } } })] } })
 const inputFor = (wrapper, id) => wrapper.get(`[data-testid="${id}"]`).get('input')
@@ -405,6 +405,72 @@ describe('manual transfer page', () => {
     expect(api.currentPluginConfig().discovery_enabled).toBe(false)
     expect(api.currentPluginConfig().future_setting).toEqual({ retained: true })
     expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('已关闭')
+  })
+
+  it('saves an exact qBittorrent category with empty tags and roots, preserves config, and reads it back', async () => {
+    let current = { ...initialPluginConfig, automatic_match_mode: 'category', torrent_tag: '', torrent_category: '', recognize_dirs: '' }
+    const api = {
+      get: vi.fn(async url => url.endsWith('/options') ? options
+        : url.endsWith('/automatic/status') ? { ...automaticStatus, match_mode: 'category', torrent_tag: '', torrent_category: current.torrent_category }
+          : url === 'download/clients' ? { success: true, message: '', data: [{ name: 'qb', type: 'qbittorrent' }] }
+            : url === 'plugin/plugin-x' ? { success: true, message: '', data: { ...current } } : {}),
+      put: vi.fn(async (_url, body) => { current = { ...body }; return { success: true } }),
+      post: vi.fn(),
+    }
+    const wrapper = mount(Page, { ...vuetifyOptions(), props: { api, pluginId: 'plugin-x', sourcePluginId: 'source-x' } })
+    mounted.push(wrapper)
+    await flushPromises()
+    expect(selectComponent(wrapper, 'automatic-match-mode').props('items')).toContainEqual({ title: '按下载器分类', value: 'category' })
+    expect(wrapper.text()).toContain('下载器 / 分类')
+    expect(wrapper.find('[data-testid="automatic-tag"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('分类不是标签')
+    expect(wrapper.text()).toContain('必须精确匹配')
+    expect(wrapper.text()).toContain('来源路径需在 MoviePilot 可见')
+    expect(wrapper.get('[data-testid="automatic-save-rules"]').element.disabled).toBe(true)
+    const category = wrapper.get('[data-testid="automatic-category"]')
+    expect(category.get('input').attributes('placeholder')).toBe('AV')
+    await category.get('input').setValue('AV')
+    expect(wrapper.get('[data-testid="automatic-save-rules"]').element.disabled).toBe(false)
+    await wrapper.get('[data-testid="automatic-save-rules"]').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('plugin/plugin-x', {
+      ...initialPluginConfig,
+      automatic_match_mode: 'category', torrent_tag: '', torrent_category: 'AV', recognize_dirs: '',
+    })
+    expect(current.torrent_tag).toBe('')
+    expect(current.torrent_category).toBe('AV')
+    expect(current.discovery_enabled).toBe(false)
+    expect(current.future_setting).toEqual({ retained: true })
+    await wrapper.get('[data-testid="automatic-reload-rules"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="automatic-category"]').get('input').element.value).toBe('AV')
+    expect(wrapper.text()).toContain('qb / AV')
+    expect(wrapper.get('[data-testid="automatic-toggle-state"]').text()).toBe('已关闭')
+  })
+
+  it('keeps a legacy torrent tag unchanged while saving category and blocks a blank category', async () => {
+    let current = { ...initialPluginConfig, automatic_match_mode: 'category', torrent_tag: 'legacy-tag', torrent_category: '', recognize_dirs: '' }
+    const api = {
+      get: vi.fn(async url => url.endsWith('/options') ? options
+        : url.endsWith('/automatic/status') ? { ...automaticStatus, match_mode: 'category', torrent_category: current.torrent_category }
+          : url === 'download/clients' ? { success: true, message: '', data: [{ name: 'qb', type: 'qbittorrent' }] }
+            : url === 'plugin/plugin-x' ? { success: true, message: '', data: { ...current } } : {}),
+      put: vi.fn(async (_url, body) => { current = { ...body }; return { success: true } }),
+      post: vi.fn(),
+    }
+    const wrapper = mount(Page, { ...vuetifyOptions(), props: { api, pluginId: 'plugin-x', sourcePluginId: 'source-x' } })
+    mounted.push(wrapper)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="automatic-save-rules"]').element.disabled).toBe(true)
+    current = { ...current, torrent_tag: 'latest-legacy-tag' }
+    await wrapper.get('[data-testid="automatic-category"]').get('input').setValue('AV')
+    await wrapper.get('[data-testid="automatic-save-rules"]').trigger('click')
+    await flushPromises()
+    expect(current.torrent_tag).toBe('latest-legacy-tag')
+    expect(current.torrent_category).toBe('AV')
+    await wrapper.get('[data-testid="automatic-category"]').get('input').setValue('')
+    expect(wrapper.get('[data-testid="automatic-save-rules"]').element.disabled).toBe(true)
+    expect(api.put).toHaveBeenCalledTimes(1)
   })
 
   it('turns automatic triggering on through the full plugin config and confirms server status', async () => {

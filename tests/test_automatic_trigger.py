@@ -242,6 +242,7 @@ def test_auto_new_only_local_remote_local_resets_boundary(automatic_plugin):
     {"downloader": "qbit-other"}, {"torrent_tag": "OTHER"}, {"recognize_dirs": ["/other"]},
     {"target_path": "/other-target"}, {"sources": ["javbus"]}, {"transfer_type": "copy"},
     {"automatic_match_mode": "tag"},
+    {"automatic_match_mode": "category", "torrent_category": "AV"},
 ])
 def test_auto_new_only_scope_change_rearms(automatic_plugin, change):
     plugin, config, _, _, _, _ = automatic_plugin
@@ -256,7 +257,168 @@ def test_auto_new_only_scope_change_rearms(automatic_plugin, change):
 def test_legacy_auto_match_mode_defaults_to_tag_and_path(automatic_plugin):
     plugin, _, _, _, _, _ = automatic_plugin
     assert plugin.automatic_status()["match_mode"] == "tag_and_path"
-    assert plugin.get_form()[1]["automatic_match_mode"] == "tag_or_path"
+    fields, defaults = plugin.get_form()
+    assert defaults["automatic_match_mode"] == "tag_or_path"
+    assert defaults["torrent_category"] == ""
+    category_select = next(field for field in fields if field.get("props", {}).get("model") == "automatic_match_mode")
+    assert {item["value"] for item in category_select["props"]["items"]} >= {"category"}
+    category_field = next(field for field in fields if field.get("props", {}).get("model") == "torrent_category")
+    assert category_field["component"] == "VTextField"
+
+
+def _configure_category_poll(automatic_plugin, *, handoff_mode="discover"):
+    plugin, base, torrent, raw, _, target = automatic_plugin
+    source = Path(torrent.content_path)
+    torrent.save_path = str(source.parent)
+    torrent.category = "AV"
+    torrent.tags = "PT, 馒头"
+    raw.update(tags=torrent.tags, category="AV", completion_on=int(time.time()))
+    config = {
+        **base, "auto_new_only": True, "automatic_match_mode": "category",
+        "torrent_category": "AV", "recognize_dirs": [str(source.parent)],
+        "handoff_mode": handoff_mode, "target_path": str(target),
+        "transfer_type": "link", "ownership_ack": True, "auxiliary_ack": True,
+    }
+    plugin.init_plugin(config)
+    plugin.chain = SimpleNamespace(
+        list_torrents=lambda **_kwargs: [torrent],
+        torrent_files=lambda **_kwargs: [DownloaderFile(
+            id=0, name=source.name, size=source.stat().st_size, priority=1, progress=1)],
+    )
+    set_started_at(plugin, int(time.time()) - 2)
+    raw["completion_on"] = int(time.time())
+    return plugin, config, torrent, raw, source
+
+
+def test_category_mode_discovers_av_category_without_av_tag_through_real_poll(automatic_plugin):
+    plugin, _, torrent, _, source = _configure_category_poll(automatic_plugin)
+
+    status = plugin.automatic_status()
+    assert status["match_mode"] == "category"
+    assert status["torrent_category"] == "AV"
+    assert plugin.get_service()
+    discovered = plugin.poll_completed()
+
+    assert [row["path"] for row in discovered] == [str(source)]
+    assert torrent.category == "AV"
+    assert "AV" not in {tag.strip() for tag in torrent.tags.split(",")}
+
+
+def test_category_mode_does_not_treat_av_tag_as_category(automatic_plugin):
+    plugin, _, torrent, raw, _ = _configure_category_poll(automatic_plugin)
+    torrent.category = "OTHER"
+    torrent.tags = "AV, PT"
+    raw.update(category="OTHER", tags=torrent.tags)
+
+    assert plugin.get_service()
+    assert plugin.poll_completed() == []
+
+
+@pytest.mark.parametrize(("torrent_category", "raw_category"), [
+    (None, "AV"), ("", "AV"), ("AV", None), ("AV", ""), ("av", "AV"),
+])
+def test_category_mode_fails_closed_for_missing_empty_or_case_mismatched_category(
+        automatic_plugin, torrent_category, raw_category):
+    plugin, _, torrent, raw, _ = _configure_category_poll(automatic_plugin)
+    torrent.category = torrent_category
+    if raw_category is None:
+        raw.pop("category", None)
+    else:
+        raw["category"] = raw_category
+    assert plugin.get_service()
+    assert plugin.poll_completed() == []
+
+
+@pytest.mark.parametrize("mutate_on_call", [1, 2, 3], ids=["before-discovery", "before-enqueue", "execution-recheck"])
+def test_category_is_rechecked_from_fresh_raw_rows_at_each_candidate_boundary(
+        automatic_plugin, monkeypatch, mutate_on_call):
+    plugin, _, torrent, raw, source = _configure_category_poll(automatic_plugin, handoff_mode="preview")
+    from app.application import service as service_directory
+
+    raw_calls = []
+
+    def get_completed_torrents(**kwargs):
+        raw_calls.append(kwargs)
+        row = dict(raw)
+        if len(raw_calls) >= mutate_on_call:
+            row["category"] = "OTHER"
+        return [row] if kwargs.get("ids") == [torrent.hash] else []
+
+    instance = SimpleNamespace(get_completed_torrents=get_completed_torrents)
+    module = SimpleNamespace(get_instances=lambda: {"qbit-main": instance})
+    monkeypatch.setattr(service_directory, "_module_loader", lambda _kind: [module])
+    enqueued = []
+    plugin._handoff.enqueue_batch = lambda *args, **kwargs: enqueued.append((args, kwargs))
+    execution_results = []
+
+    def run_pending(candidate_check, *_args, **_kwargs):
+        if enqueued:
+            payload = {"download_hash": torrent.hash, "downloader": torrent.downloader, "path": str(source)}
+            execution_results.append(candidate_check(payload))
+
+    plugin._handoff.run_pending = run_pending
+    plugin.poll_completed()
+
+    assert all(call.get("tags") is None for call in raw_calls)
+    assert raw_calls
+    if mutate_on_call == 1:
+        assert plugin._journal.cache.get("poll_cursor") is not None
+        assert enqueued == [] and execution_results == []
+    elif mutate_on_call == 2:
+        assert enqueued == [] and execution_results == []
+    else:
+        assert enqueued
+        assert execution_results == [False]
+
+
+def test_category_mode_requires_complete_public_file_manifest(automatic_plugin):
+    plugin, _, _, _, _ = _configure_category_poll(automatic_plugin)
+    plugin.chain.torrent_files = lambda **_kwargs: None
+
+    assert plugin.get_service()
+    assert plugin.poll_completed() == []
+    assert "清单" in plugin._handoff_error
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", 1, []])
+def test_category_mode_invalid_or_missing_category_does_not_register_poll(automatic_plugin, value):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": "category", "torrent_category": value})
+
+    assert plugin.automatic_status()["match_mode"] == "category"
+    assert plugin.get_service() == []
+
+
+def test_category_mode_without_category_fails_readonly_condition_check(automatic_plugin, monkeypatch):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": "category", "torrent_category": ""})
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, _key: [])
+
+    result = plugin.automatic_check()
+
+    assert result["match_mode"] == "category"
+    assert result["ready"] is False
+    assert any("分类" in error for error in result["errors"])
+
+
+def test_category_scope_change_rearms_but_adding_category_to_legacy_tag_scope_does_not(automatic_plugin):
+    plugin, config, _, _, _, _ = automatic_plugin
+    category_config = {**config, "automatic_match_mode": "category", "torrent_category": "AV"}
+    plugin.init_plugin(category_config)
+    first = plugin._auto_guard.started_at
+    signature = plugin._auto_guard.scope_signature
+    plugin.init_plugin({**category_config, "torrent_category": "OTHER"})
+    assert plugin._auto_guard.scope_signature != signature
+    assert plugin._auto_guard.started_at > first
+
+    legacy_config = {**config, "automatic_match_mode": "tag", "torrent_tag": "JAV"}
+    plugin.init_plugin(legacy_config)
+    legacy_started = plugin._auto_guard.started_at
+    legacy_signature = plugin._auto_guard.scope_signature
+    assert plugin.automatic_status()["torrent_category"] == ""
+    plugin.init_plugin({**legacy_config, "torrent_category": "AV"})
+    assert plugin._auto_guard.scope_signature == legacy_signature
+    assert plugin._auto_guard.started_at == legacy_started
 
 
 @pytest.mark.parametrize(("match_mode", "tag", "roots", "torrent_tags", "should_discover"), [
@@ -391,6 +553,7 @@ def test_disabled_discovery_still_registers_authenticated_status_and_check(autom
     assert status.status_code == check.status_code == 200
     assert status.json()["enabled"] is False
     assert status.json()["interval_seconds"] == 300
+    assert status.json()["torrent_category"] == ""
     assert check.json()["ready"] is True and check.json()["message"] == "条件检查通过"
     assert calls == []
 
@@ -408,6 +571,69 @@ def test_automatic_check_summarizes_public_rows_and_native_directory_overlap(aut
     assert result["native_monitor_overlap"] is True
     assert result["ready"] is False
     assert "download_path" not in str(result) and "completion_on" not in str(result)
+
+
+def test_category_mode_keeps_native_monitor_overlap_blocking(automatic_plugin, monkeypatch):
+    plugin, config, _, _, _, _ = automatic_plugin
+    plugin.init_plugin({**config, "automatic_match_mode": "category", "torrent_category": "AV"})
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, key: [
+        {"name": "native", "storage": "local",
+         "download_path": str(Path(plugin._dirs[0]) / "nested"), "monitor_type": "monitor"},
+    ] if key == SystemConfigKey.Directories else [])
+
+    result = plugin.automatic_check()
+
+    assert result["match_mode"] == "category"
+    assert result["native_monitor_overlap"] is None
+    assert result["ready"] is False
+    assert any("无法静态核实" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize("monitor_path_kind", ["stale-configured-root", "actual-task-root"])
+def test_category_automatic_check_does_not_claim_static_overlap_from_dynamic_roots(
+        automatic_plugin, monkeypatch, tmp_path, monitor_path_kind):
+    plugin, config, torrent, _, _, _ = automatic_plugin
+    actual_task_root = Path(torrent.content_path).parent
+    stale_configured_root = tmp_path / "stale-configured-root"
+    plugin.init_plugin({
+        **config,
+        "automatic_match_mode": "category",
+        "torrent_category": "AV",
+        "recognize_dirs": [str(stale_configured_root)],
+    })
+    monitored = (stale_configured_root if monitor_path_kind == "stale-configured-root"
+                 else actual_task_root)
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, key: [{
+        "name": "native", "storage": "local", "download_path": str(monitored),
+        "monitor_type": "monitor",
+    }] if key == SystemConfigKey.Directories else [])
+
+    result = plugin.automatic_check()
+
+    # Category roots are resolved from each mapped task, so setup check cannot
+    # compare either the leftover recognize_dirs value or one observed torrent.
+    assert result["native_monitor_overlap"] is None
+    assert result["ready"] is False
+    assert any("无法静态核实" in error for error in result["errors"])
+
+
+def test_category_poll_uses_actual_task_roots_and_blocks_actual_native_overlap(
+        automatic_plugin, monkeypatch):
+    plugin, _, torrent, raw, source = _configure_category_poll(automatic_plugin)
+    actual_task_root = Path(source).parent
+    plugin._dirs = (Path("/unrelated-stale-root"),)
+    monkeypatch.setattr(SystemConfigOper, "get", lambda _self, key: [{
+        "name": "native", "storage": "local", "download_path": str(actual_task_root),
+        "monitor_type": "monitor",
+    }] if key == SystemConfigKey.Directories else [])
+    raw["completion_on"] = int(time.time())
+    set_started_at(plugin, int(time.time()) - 2)
+
+    assert plugin.get_service()
+    assert plugin.poll_completed() == []
+    assert plugin._auto_counts["enqueued"] == 0
+    assert not plugin._journal.discover(torrent, ())
+    assert "原生监控目录与候选来源存在重叠" in plugin._handoff_error
 
 
 @pytest.mark.parametrize("completion_on", [0, -1, True, 4_000_000_000])

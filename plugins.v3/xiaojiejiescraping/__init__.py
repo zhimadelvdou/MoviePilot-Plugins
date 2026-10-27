@@ -36,7 +36,7 @@ from .manual_api import api_routes as manual_api_routes
 from .layout import safe_component
 from .artwork_relay import JavBusArtworkRelay, api_routes as artwork_api_routes
 
-MATCH_MODES = frozenset({"tag", "path", "tag_or_path", "tag_and_path"})
+MATCH_MODES = frozenset({"tag", "path", "tag_or_path", "tag_and_path", "category"})
 
 
 class XiaojiejieScraping(_PluginBase):
@@ -44,7 +44,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.13"
+    plugin_version = "0.8.14"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -70,6 +70,7 @@ class XiaojiejieScraping(_PluginBase):
         self._discovery = False
         self._downloader = ""
         self._tag = ""
+        self._category = ""
         self._journal = None
         self._actor_images = False
         self._actress_subfolder = False
@@ -104,6 +105,8 @@ class XiaojiejieScraping(_PluginBase):
                                 else "invalid")
             self._downloader = str(config.get("downloader") or "").strip()
             self._tag = str(config.get("torrent_tag") or "").strip()
+            raw_category = config.get("torrent_category")
+            self._category = raw_category.strip() if isinstance(raw_category, str) else ""
             self._dirs = tuple(Path(v) for v in self._lines(config.get("recognize_dirs")) if Path(v).is_absolute() and Path(v) != Path("/") and ".." not in Path(v).parts)
             self._actor_images = config.get("actor_images") is True
             self._actress_subfolder = config.get("actress_subfolder") is True
@@ -147,6 +150,8 @@ class XiaojiejieScraping(_PluginBase):
                 "operation": str(config.get("transfer_type") or ""),
                 "match_mode": self._match_mode,
             }
+            if self._match_mode == "category":
+                scope_payload["torrent_category"] = self._category
             if self._actress_subfolder:
                 scope_payload["actress_subfolder"] = True
             scope_signature = task_key(scope_payload)
@@ -205,8 +210,9 @@ class XiaojiejieScraping(_PluginBase):
         uses_tag = self._match_mode in ("tag", "tag_or_path", "tag_and_path")
         uses_path = self._match_mode in ("path", "tag_or_path", "tag_and_path")
         valid_scope = (self._match_mode in MATCH_MODES
-                       and ((bool(self._tag) or bool(self._dirs)) if self._match_mode == "tag_or_path"
-                            else (not uses_tag or bool(self._tag)) and (not uses_path or bool(self._dirs))))
+                       and (bool(self._category) if self._match_mode == "category" else
+                            ((bool(self._tag) or bool(self._dirs)) if self._match_mode == "tag_or_path"
+                             else (not uses_tag or bool(self._tag)) and (not uses_path or bool(self._dirs)))))
         if not (self._enabled and self._discovery and self._downloader and valid_scope and self._storage == "local"):
             return []
         return [{"id": "xiaojiejiescraping_discovery", "name": "Xiaojiejie-Scraping 完成任务轮询", "trigger": "interval",
@@ -237,7 +243,8 @@ class XiaojiejieScraping(_PluginBase):
             return None
 
     @staticmethod
-    def _safe_completed_row(row: dict | None, download_hash: str, tag: str | None) -> bool:
+    def _safe_completed_row(row: dict | None, download_hash: str, tag: str | None,
+                            *, category: str | None = None) -> bool:
         if not isinstance(row, dict) or row.get("hash") != download_hash:
             return False
         progress, left = row.get("progress"), row.get("amount_left")
@@ -245,7 +252,8 @@ class XiaojiejieScraping(_PluginBase):
         return (str(row.get("state") or "").lower() in safe_states
                 and type(progress) in (int, float) and math.isfinite(progress) and progress >= 1
                 and type(left) in (int, float) and math.isfinite(left) and left == 0
-                and (not tag or tag in exact_tags(row.get("tags"))))
+                and (not tag or tag in exact_tags(row.get("tags")))
+                and (category is None or row.get("category") == category))
 
     @staticmethod
     def _safe_completed_hash(downloader: str, download_hash: str, tag: str | None) -> bool:
@@ -260,10 +268,10 @@ class XiaojiejieScraping(_PluginBase):
 
     def _completed_candidate_allowed(self, downloader: str, download_hash: str,
                                      tag: str | None, started_at: int | None,
-                                     *, require_new: bool) -> bool:
+                                     *, require_new: bool, category: str | None = None) -> bool:
         """Use one fresh raw row for status and optional new-only time proof."""
         row = self._raw_completed_row(downloader, download_hash)
-        if not self._safe_completed_row(row, download_hash, tag):
+        if not self._safe_completed_row(row, download_hash, tag, category=category):
             return False
         return (not require_new or (started_at is not None
                                     and is_valid_completion_time(row.get("completion_on"), started_at)))
@@ -336,8 +344,16 @@ class XiaojiejieScraping(_PluginBase):
                 return None
         return False
 
-    def _candidate_files(self, torrent, mode: str, tag: str, roots: tuple[Path, ...]):
-        """Return mapped file candidates, their per-task scope, and whether tag ownership is required."""
+    def _candidate_files(self, torrent, mode: str, tag: str, roots: tuple[Path, ...],
+                         category: str | None = None):
+        """Return mapped candidates, task scope, and whether a public manifest is required."""
+        if mode == "category":
+            category_match = bool(category and getattr(torrent, "category", None) == category)
+            task_roots = self._task_scope_roots(torrent) if category_match else ()
+            category_files = (torrent_files(torrent, downloader=self._downloader, tag=None, roots=task_roots)
+                              if task_roots else ())
+            return ((category_files, task_roots, True, None)
+                    if category_files else ((), (), True, None))
         tag_match = bool(tag and tag in exact_tags(getattr(torrent, "tags", None)))
         path_files = (torrent_files(torrent, downloader=self._downloader, tag=None, roots=roots)
                       if roots else ())
@@ -358,8 +374,14 @@ class XiaojiejieScraping(_PluginBase):
             return (path_files, roots, False, None) if path_files else ((), (), False, None)
         return (), (), False, None
 
-    def _torrent_scope_choice(self, torrent, mode: str, tag: str, roots: tuple[Path, ...]):
+    def _torrent_scope_choice(self, torrent, mode: str, tag: str, roots: tuple[Path, ...],
+                              category: str | None = None):
         """Choose the matching branch without walking files before the bounded journal batch."""
+        if mode == "category":
+            if not category or getattr(torrent, "category", None) != category:
+                return None
+            task_roots = self._task_scope_roots(torrent)
+            return (task_roots, True, None) if task_roots else None
         tag_match = bool(tag and tag in exact_tags(getattr(torrent, "tags", None)))
         task_roots = self._task_scope_roots(torrent) if tag_match else ()
         mapped = getattr(torrent, "content_path", None) or getattr(torrent, "path", None)
@@ -405,6 +427,7 @@ class XiaojiejieScraping(_PluginBase):
                 self._auto_counts = {"checked": 0, "new_only_rejected": 0, "discovered": 0, "enqueued": 0}
                 generation, journal = self._generation, self._journal
                 downloader, tag, roots = self._downloader, self._tag, self._dirs
+                category = self._category if self._match_mode == "category" else None
                 match_mode = self._match_mode
                 handoff, handoff_limit = self._handoff, self._handoff_limit
                 new_only = self._auto_new_only
@@ -419,7 +442,7 @@ class XiaojiejieScraping(_PluginBase):
             for torrent in torrents:
                 if getattr(torrent, "downloader", None) != downloader:
                     continue
-                choice = self._torrent_scope_choice(torrent, match_mode, tag, roots)
+                choice = self._torrent_scope_choice(torrent, match_mode, tag, roots, category)
                 if choice is None:
                     continue
                 candidates_by_key[(torrent.downloader, torrent.hash)] = choice
@@ -438,7 +461,8 @@ class XiaojiejieScraping(_PluginBase):
                 with self._lock:
                     self._auto_counts["checked"] += 1
                 if not self._completed_candidate_allowed(downloader, torrent.hash, effective_tag,
-                                                        started_at, require_new=new_only):
+                                                        started_at, require_new=new_only,
+                                                        category=category):
                     with self._lock:
                         if not self._enabled or self._generation != generation or not journal:
                             return []
@@ -450,7 +474,8 @@ class XiaojiejieScraping(_PluginBase):
                 if not files:
                     journal.advance(torrent)
                     continue
-                if used_tag or (handoff and handoff.config.mode in ("preview", "execute")):
+                if (used_tag or match_mode == "category"
+                        or (handoff and handoff.config.mode in ("preview", "execute"))):
                     owned = self._manifest_files(torrent, files)
                     if owned is None:
                         with self._lock:
@@ -479,7 +504,8 @@ class XiaojiejieScraping(_PluginBase):
                     self._auto_counts["discovered"] += len(files)
                     if handoff and handoff.config.mode in ("preview", "execute"):
                         if not self._completed_candidate_allowed(
-                                downloader, torrent.hash, effective_tag, started_at, require_new=new_only):
+                                downloader, torrent.hash, effective_tag, started_at, require_new=new_only,
+                                category=category):
                             if new_only:
                                 self._auto_counts["new_only_rejected"] += 1
                             journal.advance(torrent)
@@ -517,13 +543,15 @@ class XiaojiejieScraping(_PluginBase):
                     return False
                 if payload.get("match_mode") not in (None, match_mode):
                     return False
-                candidate_info = self._candidate_files(matches[0], match_mode, tag, roots)
+                candidate_info = self._candidate_files(matches[0], match_mode, tag, roots, category)
                 candidates, candidate_roots, used_tag, effective_tag = candidate_info
                 if (not candidates or not self._completed_candidate_allowed(
-                        downloader, payload["download_hash"], effective_tag, started_at, require_new=new_only)
+                        downloader, payload["download_hash"], effective_tag, started_at,
+                        require_new=new_only, category=category)
                         or not can_continue()):
                     return False
-                if used_tag or (handoff and handoff.config.mode in ("preview", "execute")):
+                if (used_tag or match_mode == "category"
+                        or (handoff and handoff.config.mode in ("preview", "execute"))):
                     candidates = self._manifest_files(matches[0], candidates)
                 if candidates is None:
                     return False
@@ -1042,6 +1070,7 @@ class XiaojiejieScraping(_PluginBase):
             "interval_seconds": 300,
             "downloader": self._downloader,
             "torrent_tag": self._tag,
+            "torrent_category": self._category,
             "roots": [str(root) for root in self._dirs],
             "target_path": str(self._handoff.config.target_path) if self._handoff else "",
             "last_poll_at": self._last_poll_at,
@@ -1085,13 +1114,13 @@ class XiaojiejieScraping(_PluginBase):
         directories_available = monitors is not None
         native_monitor_count = len(monitors) if monitors is not None else 0
         roots = tuple(Path(root) for root in self._dirs
-                      if self._match_mode != "tag"
+                      if self._match_mode not in ("tag", "category")
                       and Path(root).is_absolute() and ".." not in Path(root).parts)
         native_monitor_overlap: bool | None = None
         if monitors is None:
             errors.append("原生监控目录规则不可读")
         elif not roots:
-            # Tag-selected roots come from each mapped torrent path; a setup check cannot infer them.
+            # Tag/category-selected roots come from each mapped torrent path; a setup check cannot infer them.
             native_monitor_overlap = False if not monitors else None
         else:
             native_monitor_overlap = any(
@@ -1106,12 +1135,12 @@ class XiaojiejieScraping(_PluginBase):
             errors.append("未观察到带有效完成时间的 qBittorrent 行")
         uses_tag = self._match_mode in ("tag", "tag_or_path", "tag_and_path")
         uses_path = self._match_mode in ("path", "tag_or_path", "tag_and_path")
-        config_ready = (self._match_mode in MATCH_MODES
-                        and ((bool(self._tag) or bool(roots)) if self._match_mode == "tag_or_path"
-                             else (not uses_tag or bool(self._tag)) and (not uses_path or bool(roots)))
-                        and self._storage == "local")
+        scope_ready = (bool(self._category) if self._match_mode == "category" else
+                       ((bool(self._tag) or bool(roots)) if self._match_mode == "tag_or_path"
+                        else (not uses_tag or bool(self._tag)) and (not uses_path or bool(roots))))
+        config_ready = self._match_mode in MATCH_MODES and scope_ready and self._storage == "local"
         if not config_ready:
-            errors.append("匹配模式所需的标签、路径或本地存储配置不完整")
+            errors.append("匹配模式所需的分类、标签、路径或本地存储配置不完整")
         ready = bool(config_ready and downloader_type == "qbittorrent" and completion_capability
                      and completion_rows_checked > 0 and completion_time_rows > 0
                      and directories_available and native_monitor_overlap is False)
@@ -1197,11 +1226,13 @@ class XiaojiejieScraping(_PluginBase):
             {"component": "VSelect", "props": {"model": "automatic_match_mode", "label": "自动匹配方式", "items": [
                 {"title": "专用标签", "value": "tag"}, {"title": "配置路径", "value": "path"},
                 {"title": "标签或路径", "value": "tag_or_path"}, {"title": "标签且路径（旧配置兼容）", "value": "tag_and_path"},
+                {"title": "qBittorrent 分类（独立筛选）", "value": "category"},
             ]}},
             {"component": "VSwitch", "props": {"model": "discovery_enabled", "label": "每五分钟检查 qBittorrent 已完成任务（具体动作取决于下方模式）"}},
             {"component": "VSwitch", "props": {"model": "auto_new_only", "label": "只处理本次启用后新完成的任务；重载保留时间边界"}},
             {"component": "VTextField", "props": {"model": "downloader", "label": "MoviePilot 已配置的 qBittorrent 下载器名称"}},
             {"component": "VTextField", "props": {"model": "torrent_tag", "label": "专用标签（仅在所选匹配方式需要时使用，精确匹配）"}},
+            {"component": "VTextField", "props": {"model": "torrent_category", "label": "qBittorrent 分类（仅分类模式需要，精确匹配）"}},
             {"component": "VSelect", "props": {"model": "handoff_mode", "label": "自动流程模式", "items": [{"title": "只读发现（默认）", "value": "discover"}, {"title": "预览：查询来源/缓存，不搬文件", "value": "preview"}, {"title": "执行：交 MoviePilot 整理并刮削", "value": "execute"}]}},
             {"component": "VTextField", "props": {"model": "target_path", "label": "明确目标：MoviePilot 容器内既有目录，不能与输入目录重叠"}},
             {"component": "VSelect", "props": {"model": "transfer_type", "label": "明确整理方式（保留 qBittorrent 源文件）", "items": [{"title": "复制", "value": "copy"}, {"title": "硬链接", "value": "link"}]}},
@@ -1213,4 +1244,4 @@ class XiaojiejieScraping(_PluginBase):
             {"component": "VTextarea", "props": {"model": "image_hosts", "label": "批准的图片 HTTPS 主机，每行一个；空值不提供图片地址"}},
             {"component": "VAlert", "props": {"type": "info", "text": "; ".join(status.label + ("：离线适配，未实站验收" if status.state == "offline_adapter" else "：暂不可用，现行接口待核实" if status.state == "blocked" else "：待实现") for status in PROVIDERS)}},
         ]
-        return fields, {"enabled": False, "sources": ["manko"], "javbus_api_url": "", "storage": "local", "recognize_dirs": "", "automatic_match_mode": "tag_or_path", "image_hosts": "", "discovery_enabled": False, "auto_new_only": True, "downloader": "", "torrent_tag": "", "actor_images": False, "actress_subfolder": False, "handoff_mode": "discover", "target_path": "", "transfer_type": "", "ownership_ack": False, "auxiliary_ack": False, "handoff_limit": 1}
+        return fields, {"enabled": False, "sources": ["manko"], "javbus_api_url": "", "storage": "local", "recognize_dirs": "", "automatic_match_mode": "tag_or_path", "image_hosts": "", "discovery_enabled": False, "auto_new_only": True, "downloader": "", "torrent_tag": "", "torrent_category": "", "actor_images": False, "actress_subfolder": False, "handoff_mode": "discover", "target_path": "", "transfer_type": "", "ownership_ack": False, "auxiliary_ack": False, "handoff_limit": 1}

@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.18 新增 FC2 官方商品页匿名 JSON-LD 元数据源 `fc2`（显示名“FC2官方”）：按官方 article URL 与 Product sku/productID 精确核对，只映射同一 Product 的标题、简介和图片候选；无演员及结构化日期时留空，seller 不作为演员。2026-10-28 已在 DSM `192.168.100.133` 的 MoviePilot V2 部署并启用；FC2-PPV-1229107 同步/异步查询、原生搜索与详情及封面 HTTPS 解码均通过单样本验收。官方 metadata 的 HTTP 图片候选仅对精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不发起 HTTP 图片请求；最终主机仍须经 `image_hosts` 精确批准。该验收不覆盖其它商品或旧内容，也不代表完整 NFO、媒体整理或自动下载链已验收。详见[FC2 官方来源部署记录](../records/fc2-official-source-2026-10-28.md)。0.8.17 的 JavBus 整理命名统一使用番号，保留现有年份与版本模板；完整标题仍用于搜索、预览和 NFO。0.8.16 在手动来源浏览中显示已核实的整理状态，区分目录全部、部分和检查不完整，仅查询已有记录；状态仅说明文件传输，不代表刮削或 NFO/图片完成。0.8.15 集成手动整理界面调整：目录浏览默认按修改时间从旧到新排序；有效预览后可直接点击“确认并整理”，无需额外勾选。预览过期或选择变更后仍须重新预览，异常/未知执行结果仍防止重复提交。0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API 与女优证据，以及完整公开文件清单（仅当所有文件 ID 缺失时使用内部位置校验，混合 ID 仍拒绝）兼容保持。
+这是开发版本。0.8.19 对已验证 FC2 canonical 番号不建立演员目录，并让原生 formatter 使用可信番号及已有年份模板；完整来源标题及 NFO title/overview 保留。年份只取已验证的 projected year，缺失时 formatter year 置空。手动与自动流程均在执行重核身份后应用该规则，非 FC2 演员目录门禁不变。0.8.19 已部署验证并完成 FC2 原生预览，详见[FC2目录整理记录](../records/fc2-layout-2026-10-28.md)。0.8.18 新增 FC2 官方商品页匿名 JSON-LD 元数据源 `fc2`（显示名“FC2官方”）：按官方 article URL 与 Product sku/productID 精确核对，只映射同一 Product 的标题、简介和图片候选；无演员及结构化日期时留空，seller 不作为演员。2026-10-28 已在 DSM `192.168.100.133` 的 MoviePilot V2 部署并启用；FC2-PPV-1229107 同步/异步查询、原生搜索与详情及封面 HTTPS 解码均通过单样本验收。官方 metadata 的 HTTP 图片候选仅对精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不发起 HTTP 图片请求；最终主机仍须经 `image_hosts` 精确批准。该验收不覆盖其它商品或旧内容，也不代表完整 NFO、媒体整理或自动下载链已验收。详见[FC2 官方来源部署记录](../records/fc2-official-source-2026-10-28.md)。0.8.17 的 JavBus 整理命名统一使用番号，保留现有年份与版本模板；完整标题仍用于搜索、预览和 NFO。0.8.16 在手动来源浏览中显示已核实的整理状态，区分目录全部、部分和检查不完整，仅查询已有记录；状态仅说明文件传输，不代表刮削或 NFO/图片完成。0.8.15 集成手动整理界面调整：目录浏览默认按修改时间从旧到新排序；有效预览后可直接点击“确认并整理”，无需额外勾选。预览过期或选择变更后仍须重新预览，异常/未知执行结果仍防止重复提交。0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API 与女优证据，以及完整公开文件清单（仅当所有文件 ID 缺失时使用内部位置校验，混合 ID 仍拒绝）兼容保持。
 
 0.8.13 延续 0.8.12 的女主演证据规则，并在 JavBus 详情数据中按顺序提取最多 8 个去重 HTTPS `samples[].src` 图片候选。手动搜索/详情展示时，JavBus 封面和背景字段可使用限时签名的同源图片路由；路由只允许当前 `image_hosts` 已批准的 JavBus 封面/样图及 DMM 视频样图 URL，固定发送 JavBus 根页 Referer，不接收账号 Cookie，并限制响应大小、图片 MIME 和解码尺寸。签名 URL 签发有效期为 1 小时，插件配置重载即失效。该路由只服务搜索和详情展示；`metadata_img` 仍按既有合同返回原始上游 HTTPS URL，由 MoviePilot 原生下载，宿主下载是否成功仍取决于宿主访问条件，未在此版本承诺。完整演员 cast、女优来源证据、NFO 与自动整理边界不变。JavBus JSON API 继续使用单独配置的基址，默认留空；须显式选择来源才参与识别。API 与图片代理验证不代表完整刮削、整理或部署验收；自动整理保持默认关闭、默认只读发现。
 
@@ -62,7 +62,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 | handoff_mode | discover | discover 只发现；preview 查询并预览；execute 原生整理并刮削 |
 | target_path | 空 | 既有本地目标目录，不允许与输入目录相互包含 |
 | transfer_type | 空 | 必须明确选择 copy 复制或 link 硬链接；无默认搬运方式 |
-| actress_subfolder | false | 在媒体库下按女主演姓名增加一级目录；Manko 使用当次 `avdbs_actor is True`，JavBus 使用安全且无身份冲突的来源女优目录列表；均默认选首位、手动可改选，无证据时停止 |
+| actress_subfolder | false | 在媒体库下按女主演姓名增加一级目录；Manko 使用当次 `avdbs_actor is True`，JavBus 使用安全且无身份冲突的来源女优目录列表；均默认选首位、手动可改选，无证据时停止；已验证 FC2 番号跳过演员目录 |
 | ownership_ack | false | 执行前确认相同来源已排除在宿主原生自动监控之外 |
 | auxiliary_ack | false | 执行前确认理解原生 TMDB 辅助补充风险并核对预览 |
 | handoff_limit | 1 | 每轮最多准备/处理的新文件数，范围 1–5 |

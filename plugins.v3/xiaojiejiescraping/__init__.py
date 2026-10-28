@@ -45,7 +45,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.18"
+    plugin_version = "0.8.19"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -144,7 +144,8 @@ class XiaojiejieScraping(_PluginBase):
                         actress_subfolder=self._actress_subfolder,
                     )
                     self._handoff = HandoffCoordinator(ledger, handoff_config, self.recognize_scoped,
-                                                       actress_evidence=self.actress_evidence)
+                                                       actress_evidence=self.actress_evidence,
+                                                       fc2_identity_matches=self._fc2_identity_matches)
                 except HandoffLedgerError:
                     self._handoff_error = "交接账本不可用，自动交接已阻止；不会重置或删除旧状态"
             scope_payload = {
@@ -193,9 +194,9 @@ class XiaojiejieScraping(_PluginBase):
                     self._generation, self._image_hosts)
 
     def _register_javbus_rename_hook(self) -> bool:
-        """Register the host rename extension only while JavBus is enabled."""
+        """Register the host rename extension only while a supported source is enabled."""
         with self._lock:
-            active = self._enabled and "javbus" in self._active_sources
+            active = self._enabled and bool({"javbus", "fc2", "fc2hub", "fc2ppvdb"}.intersection(self._active_sources))
         if not active or self._rename_event_manager is not None:
             return False
         try:
@@ -234,7 +235,7 @@ class XiaojiejieScraping(_PluginBase):
         return True
 
     def _on_transfer_rename_build(self, event_data) -> None:
-        """Use the owned JavBus number for the formatter copy, never raw media metadata."""
+        """Use a validated packet number for the formatter copy, never raw media metadata."""
         payload = getattr(event_data, "event_data", None)
         if payload is None and isinstance(event_data, dict):
             payload = event_data
@@ -247,10 +248,12 @@ class XiaojiejieScraping(_PluginBase):
         mediainfo = rename_dict.get("__mediainfo__")
         if mediainfo is None:
             return
-        if str(getattr(mediainfo, "media_source", None)) != "javbus":
+        source = str(getattr(mediainfo, "media_source", None))
+        supported = {"javbus", "fc2", "fc2hub", "fc2ppvdb"}
+        if source not in supported:
             return
         with self._lock:
-            if not self._enabled or "javbus" not in self._active_sources:
+            if not self._enabled or source not in self._active_sources:
                 return
             generation = self._generation
         media_type = getattr(mediainfo, "type", None)
@@ -268,19 +271,26 @@ class XiaojiejieScraping(_PluginBase):
             record = packet["record"]
             number = packet["number"]
             identity = str(getattr(mediainfo, "media_id", ""))
-            if (record.get("_source", "javbus") != "javbus"
+            if (record.get("_source", source) != source
                     or str(record.get("_id")) != identity
                     or not isinstance(number, str)
                     or normalize_number(number) != number
-                    or normalize_number(identity) != number):
+                    or record_numbers(record) != {number}):
+                return
+            if source == "javbus" and normalize_number(identity) != number:
+                return
+            if source in {"fc2", "fc2hub", "fc2ppvdb"} and not number.startswith("FC2-PPV-"):
                 return
         except Exception:
             return
         with self._lock:
-            if (not self._enabled or "javbus" not in self._active_sources
+            if (not self._enabled or source not in self._active_sources
                     or generation != self._generation):
                 return
             rename_dict["title"] = number
+            if source in {"fc2", "fc2hub", "fc2ppvdb"}:
+                year = owned.get("projected", {}).get("year")
+                rename_dict["year"] = year if isinstance(year, str) and len(year) == 4 and year.isdigit() else ""
 
     def get_state(self) -> bool:
         """返回实例是否已启用。"""
@@ -1043,6 +1053,31 @@ class XiaojiejieScraping(_PluginBase):
                 if isinstance(actor, dict) and actor.get("_image_source") == "gfriends":
                     actor.pop("profile_path", None)
         return actors
+
+    def _fc2_identity_matches(self, mediainfo, number: str | None = None) -> bool:
+        """Accept only this plugin's verified same-source packet and canonical FC2 number."""
+        try:
+            source = str(getattr(mediainfo, "media_source", ""))
+            identity = str(getattr(mediainfo, "media_id", ""))
+            if source not in {"fc2", "fc2hub", "fc2ppvdb"}:
+                return False
+            owned = self._owned(mediainfo)
+            if not owned:
+                return False
+            packet = owned["packet"]
+            record = packet["record"]
+            canonical = packet.get("number")
+            if (not isinstance(canonical, str) or normalize_number(canonical) != canonical
+                    or not canonical.startswith("FC2-PPV-")
+                    or (number is not None and number != canonical)):
+                return False
+            return (packet.get("source", source) == source
+                    and record.get("_source", source) == source
+                    and str(record.get("_id")) == identity
+                    and record_numbers(record) == {canonical}
+                    and canonical in set(getattr(mediainfo, "names", []) or []))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
 
     def _owned(self, mediainfo):
         source = str(getattr(mediainfo, "media_source", None))

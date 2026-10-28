@@ -23,10 +23,15 @@ from test_plugin_native_transfer_integration import (  # noqa: F401
 )
 
 
-IMAGE_PNG = bytes.fromhex(
-    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
-    "0000000c49444154789c63e051b2000000a4006798d0e0980000000049454e44ae426082"
-)
+def _synthetic_jpeg(color, size=(1, 1)):
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()
+
+
+IMAGE_JPEG = _synthetic_jpeg((220, 20, 20))
 
 
 class OfflineImageResponse:
@@ -54,13 +59,9 @@ class OfflineImageResponse:
 class OfflineImageClient:
     def __init__(self):
         self.urls = []
-        from PIL import Image
-
-        buffer = BytesIO()
-        Image.new("RGB", (1, 1), (20, 20, 220)).save(buffer, format="PNG")
         self.images = {
-            "https://images.example.test/poster.png": IMAGE_PNG,
-            "https://art.example.test/backdrop.png": buffer.getvalue(),
+            "https://images.example.test/poster.jpg": IMAGE_JPEG,
+            "https://art.example.test/backdrop.jpg": _synthetic_jpeg((20, 20, 220)),
         }
 
     def stream(self, url, **_kwargs):
@@ -169,7 +170,7 @@ def _assert_nfo(path: Path):
 def _assert_valid_fixture_image():
     from PIL import Image
 
-    with Image.open(BytesIO(IMAGE_PNG)) as image:
+    with Image.open(BytesIO(IMAGE_JPEG)) as image:
         image.verify()
 
 
@@ -205,8 +206,8 @@ def test_tag_match_outside_configured_paths_runs_real_native_hardlink_and_scrape
     configured_root.mkdir()
     target_root = tmp_path / "library"
     target_root.mkdir()
-    sample_payload["record"]["cover_image"] = "https://images.example.test/poster.png"
-    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.png"]
+    sample_payload["record"]["cover_image"] = "https://images.example.test/poster.jpg"
+    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.jpg"]
     plugin_config = {
         "enabled": True,
         "sources": ["manko"],
@@ -277,9 +278,9 @@ def test_tag_match_outside_configured_paths_runs_real_native_hardlink_and_scrape
     image_files = sorted(path.name for path in target.parent.rglob("*") if path.is_file()
                          and path.suffix.lower() in (".jpg", ".png"))
     assert image_files == ["backdrop.jpg", "fanart.jpg", "poster.jpg"]
-    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.png"]
-    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
-    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.jpg"]
+    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.jpg"]
+    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.jpg"]
     assert (target.parent / "poster.jpg").read_bytes() != (target.parent / "backdrop.jpg").read_bytes()
     assert set(image_client.urls) == set(image_client.images)
     assert offline_plugin._dirs == (configured_root,)
@@ -304,8 +305,8 @@ def test_manual_arbitrary_source_and_target_preview_execute_status_with_images(
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     manual_target = tmp_path / "manual-library"
     manual_target.mkdir()
-    sample_payload["record"]["cover_image"] = "https://images.example.test/poster.png"
-    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.png"]
+    sample_payload["record"]["cover_image"] = "https://images.example.test/poster.jpg"
+    sample_payload["record"]["backdrop_images"] = ["https://art.example.test/backdrop.jpg"]
     offline_plugin.init_plugin({
         "enabled": True,
         "sources": ["manko"],
@@ -367,9 +368,9 @@ def test_manual_arbitrary_source_and_target_preview_execute_status_with_images(
     images = sorted(path for path in target.parent.rglob("*") if path.is_file()
                     and path.suffix.lower() in (".jpg", ".png"))
     assert [path.name for path in images] == ["backdrop.jpg", "fanart.jpg", "poster.jpg"]
-    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.png"]
-    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
-    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.png"]
+    assert (target.parent / "poster.jpg").read_bytes() == image_client.images["https://images.example.test/poster.jpg"]
+    assert (target.parent / "backdrop.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.jpg"]
+    assert (target.parent / "fanart.jpg").read_bytes() == image_client.images["https://art.example.test/backdrop.jpg"]
     assert (target.parent / "poster.jpg").read_bytes() != (target.parent / "backdrop.jpg").read_bytes()
     assert set(image_client.urls) == set(image_client.images)
 

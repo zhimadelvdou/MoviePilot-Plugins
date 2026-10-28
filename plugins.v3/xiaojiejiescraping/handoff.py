@@ -99,10 +99,12 @@ class HandoffCoordinator:
     """单文件预览/交接与只读核实；不重提已进入宿主或结果不确定的任务。"""
     def __init__(self, ledger: HandoffLedger, config: HandoffConfig, recognize: Callable,
                  transfer: Callable = native_transfer, history: Callable = list_transfer_history,
-                 actress_evidence: Callable | None = None):
+                 actress_evidence: Callable | None = None,
+                 fc2_identity_matches: Callable | None = None):
         self.ledger, self.config = ledger, config
         self.recognize, self.transfer, self.history = recognize, transfer, history
         self.actress_evidence = actress_evidence
+        self.fc2_identity_matches = fc2_identity_matches
 
     def _admission(self, torrent, path: Path, scope_roots: tuple[Path, ...] | None = None,
                    match_mode: str | None = None):
@@ -204,10 +206,13 @@ class HandoffCoordinator:
             meta.begin_season = meta.begin_episode = meta.end_episode = None
             meta.year = meta.year or media.year
             media.scrape_source = str(media.media_source)
+            fc2_identity = bool(self.fc2_identity_matches
+                                and self.fc2_identity_matches(media, None))
+            actor_folder = self.config.actress_subfolder and not fc2_identity
             effective_target = target
             actress_name = None
             actress_identity = None
-            if self.config.actress_subfolder:
+            if actor_folder:
                 evidence, allowed = self.actress_evidence(media, None) if self.actress_evidence else (None, [])
                 if not evidence or allowed != evidence:
                     return self._finish(key, "failed", "primary_actress_choice_required")
@@ -220,7 +225,7 @@ class HandoffCoordinator:
                             basename=path.stem, extension=path.suffix.lstrip("."),
                             size=payload["size"], modify_time=payload["modify_time"])
             def continuation():
-                child_valid = (not self.config.actress_subfolder or child_directory_matches(
+                child_valid = (not actor_folder or child_directory_matches(
                     target, actress_name, actress_identity))
                 return (child_valid and can_continue() and self._source_valid(payload)
                         and self.config.target(scope_roots) == target)

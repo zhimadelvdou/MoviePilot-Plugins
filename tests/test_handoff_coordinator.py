@@ -1251,3 +1251,44 @@ def test_full_ledger_does_not_block_readonly_reconciliation_of_accepted_work(int
     assert records[0]["payload"]["completion_scope"] == "file_transfer"
     assert len(state.calls) == 2
     assert state.plugin._handoff_error
+
+
+def test_auto_handoff_uses_owned_canonical_number_when_it_is_not_first_alias(handoff):
+    config = replace(handoff.config, mode="preview", sources=("fc2",), actress_subfolder=True)
+    handoff.metadata.media_source = MediaSource("fc2")
+    handoff.metadata.media_id = "1234567"
+    handoff.metadata.names = ["1234567", "FC2-PPV-1234567"]
+    calls = []
+    def transfer(**kwargs):
+        calls.append(kwargs)
+        return True, {"items": [{"source": str(handoff.source), "source_storage": "local",
+            "target": str(Path(kwargs["target_path"]) / handoff.source.name), "success": True}]}
+    def verified_matcher(media, number):
+        return (number is None and media.media_source == "fc2" and media.media_id == "1234567"
+                and "FC2-PPV-1234567" in media.names)
+    coordinator = HandoffCoordinator(
+        handoff.ledger, config, handoff.recognize, transfer=transfer,
+        history=handoff.history, actress_evidence=lambda *_: ([], []),
+        fc2_identity_matches=verified_matcher,
+    )
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+    assert record is not None and result[0]["state"] == "previewed"
+    assert calls[0]["target_path"] == handoff.output
+
+
+def test_auto_handoff_still_requires_actress_when_fc2_matcher_rejects_identity(handoff):
+    config = replace(handoff.config, mode="preview", sources=("fc2",), actress_subfolder=True)
+    handoff.metadata.media_source = MediaSource("fc2")
+    handoff.metadata.media_id = "1234567"
+    handoff.metadata.names = ["1234567", "FC2-PPV-1234567"]
+    coordinator = HandoffCoordinator(
+        handoff.ledger, config, handoff.recognize, transfer=handoff.transfer,
+        history=handoff.history, actress_evidence=lambda *_: ([], []),
+        fc2_identity_matches=lambda _media, number: False if number is None else True,
+    )
+    record = coordinator.enqueue(handoff.torrent, handoff.source)
+    result = coordinator.run_pending(handoff.eligible, handoff.continue_)
+    assert record is not None and result[0]["state"] == "failed"
+    assert result[0]["payload"]["reason"] == "primary_actress_choice_required"
+    assert handoff.calls == []

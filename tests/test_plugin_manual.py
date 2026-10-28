@@ -978,3 +978,89 @@ def test_manual_number_extraction_rejects_ambiguity_and_parent_conflict(manual_w
     fallback_dir.mkdir()
     fallback = fallback_dir / "sample.mkv"
     assert workspace._number_for(fallback, workspace.roots) == "TEST-789"
+
+
+def test_fc2_manual_skips_actor_folder_with_global_flag_and_executes_same_target(manual_workspace):
+    plugin, workspace, root, target, source, calls = manual_workspace
+    source = root / "FC2-PPV-1234567.mkv"
+    manual_workspace[4].rename(source)
+    plugin._active_sources = ("fc2",)
+    plugin._actress_subfolder = True
+    media = MediaInfo()
+    media.from_dict({
+        "media_source": "fc2", "media_id": "1234567", "scrape_source": "fc2",
+        "type": "电影", "title": "FC2-PPV-1234567 Complete source title", "year": "2024",
+        "names": ["FC2-PPV-1234567"], "actors": [],
+    })
+    plugin.recognize_media = lambda **_: media
+    plugin._owned = lambda _media: {"packet": {"source": "fc2", "number": "FC2-PPV-1234567",
+        "record": {"_source": "fc2", "_id": "1234567", "number": "FC2-PPV-1234567"}}}
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="fc2", actress_subfolder=True,
+    ))
+
+    assert preview.summary.success == 1
+    assert preview.items[0].target == str(target / source.name)
+    assert preview.items[0].selected_actress is None
+    assert calls[0]["target_path"] == target
+    assert calls[0]["mediainfo"].title == "FC2-PPV-1234567 Complete source title"
+    executed = workspace.execute(preview.preview_id)
+    assert executed.state == "accepted"
+    assert [call["target_path"] for call in calls] == [target, target, target]
+
+
+def test_fc2_manual_actor_bypass_rejects_unowned_or_mismatched_packet(manual_workspace):
+    plugin, workspace, _root, target, source, calls = manual_workspace
+    plugin._active_sources = ("fc2",)
+    plugin._actress_subfolder = True
+    media = MediaInfo()
+    media.from_dict({"media_source": "fc2", "media_id": "1234567", "type": "电影",
+                     "title": "FC2-PPV-1234567 title", "names": ["FC2-PPV-1234567"], "actors": []})
+    plugin.recognize_media = lambda **_: media
+    plugin._owned = lambda _media: None
+
+    preview = workspace.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(target), media_source="fc2", actress_subfolder=True,
+    ))
+
+    assert preview.summary.failed == 1
+    assert calls == []
+
+
+def test_manual_status_accepts_verified_fc2_base_directory_hardlink(manual_workspace):
+    _plugin, _workspace, _root, target, source, _calls = manual_workspace
+    destination = target / source.name
+    os.link(source, destination)
+    source_stat = source.stat(follow_symlinks=False)
+    payload = {
+        "source": str(source), "target": str(destination),
+        "source_stat": {"device": source_stat.st_dev, "inode": source_stat.st_ino,
+                        "size": source_stat.st_size, "mtime_ns": source_stat.st_mtime_ns},
+        "target_root": str(target), "actress_root": str(target),
+        "actress_parent_root": str(target), "actress_subfolder": True,
+        "actress_name": None, "actress_directory_identity": None,
+        "media_source": "fc2", "media_id": "1234567", "number": "FC2-PPV-1234567",
+    }
+
+    assert ManualTransferWorkspace._verify_manual_transfer(
+        {"source": str(source), "target": str(destination)}, {"payload": payload})
+
+
+def test_manual_status_rejects_missing_non_fc2_actress_directory(manual_workspace):
+    _plugin, _workspace, _root, target, source, _calls = manual_workspace
+    destination = target / source.name
+    os.link(source, destination)
+    source_stat = source.stat(follow_symlinks=False)
+    payload = {
+        "source": str(source), "target": str(destination),
+        "source_stat": {"device": source_stat.st_dev, "inode": source_stat.st_ino,
+                        "size": source_stat.st_size, "mtime_ns": source_stat.st_mtime_ns},
+        "target_root": str(target), "actress_root": str(target),
+        "actress_parent_root": str(target), "actress_subfolder": True,
+        "actress_name": None, "actress_directory_identity": None,
+        "media_source": "manko", "media_id": "native-123", "number": "TEST-123",
+    }
+
+    assert not ManualTransferWorkspace._verify_manual_transfer(
+        {"source": str(source), "target": str(destination)}, {"payload": payload})

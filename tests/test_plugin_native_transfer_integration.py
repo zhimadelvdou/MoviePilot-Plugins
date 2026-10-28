@@ -19,24 +19,24 @@ from app.plugins.xiaojiejiescraping.handoff import native_transfer  # pylint: di
 from app.runtime.extensions.module.dispatcher import ModuleInvocationDispatcher
 
 
-def _synthetic_png(color, size=(800, 534)):
+def _synthetic_jpeg(color, size=(800, 534)):
     from PIL import Image
 
     buffer = BytesIO()
-    Image.new("RGB", size, color).save(buffer, format="PNG")
+    Image.new("RGB", size, color).save(buffer, format="JPEG", quality=92)
     return buffer.getvalue()
 
 
 NATIVE_IMAGES = {
-    "https://images.example.test/poster.jpg": _synthetic_png((220, 20, 20), (500, 750)),
-    "https://art.example.test/backdrop.jpg": _synthetic_png((20, 20, 220)),
+    "https://images.example.test/poster.jpg": _synthetic_jpeg((220, 20, 20), (500, 750)),
+    "https://art.example.test/backdrop.jpg": _synthetic_jpeg((20, 20, 220)),
 }
 
 
 class OfflineImageResponse:
     status_code = 200
 
-    def __init__(self, content, content_type="image/png"):
+    def __init__(self, content, content_type="image/jpeg"):
         self.content = content
         self.headers = {"Content-Type": content_type}
         self.closed = False
@@ -177,7 +177,7 @@ def offline_plugin(monkeypatch, tmp_path, sample_payload, plugin_host_context):
     monkeypatch.setattr(XiaojiejieScraping, "get_data_path", lambda _self: tmp_path / "plugin-data")
     monkeypatch.setattr(
         AnonymousRequestUtils, "get_res",
-        lambda _client, _url, **_kwargs: OfflineImageResponse(_synthetic_png((20, 20, 220))),
+        lambda _client, _url, **_kwargs: OfflineImageResponse(_synthetic_jpeg((20, 20, 220))),
     )
     plugin = XiaojiejieScraping()
     plugin.init_plugin({"enabled": True, "image_hosts": []})
@@ -791,3 +791,143 @@ def test_native_manual_actress_subfolder_preview_execute_and_scrapes(
     assert images["poster.jpg"] == NATIVE_IMAGES["https://images.example.test/poster.jpg"]
     background = "backdrop.jpg" if "backdrop.jpg" in images else "fanart.jpg"
     assert images[background] == NATIVE_IMAGES["https://art.example.test/backdrop.jpg"]
+
+
+
+@pytest.mark.parametrize(("share_date", "expected_year"), [
+    ("2024-01-02", "2024"),
+    ("", None),
+])
+def test_native_fc2_number_layout_preserves_nfo_without_actor_folder(
+        offline_plugin, bind_current_plugin_event_handler, tmp_path, request, monkeypatch,
+        share_date, expected_year,
+):
+    """Run FC2 through the real native formatter, hardlink, NFO and image write paths."""
+    import hashlib
+    import time
+    import xml.etree.ElementTree as ET
+
+    from app.plugins.xiaojiejiescraping.manual import ManualPreviewRequest
+    from app.sdk.config import settings
+
+    number = "FC2-PPV-1234567"
+    title = "FC2-PPV-1234567 Complete synthetic FC2 title"
+    overview = "Complete synthetic FC2 overview"
+    source = tmp_path / "downloads" / f"{number}.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic FC2 video bytes; no subtitles or media decoding")
+    source_before = source.stat()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    library = tmp_path / "library"
+    library.mkdir()
+    packet = {
+        "number": number,
+        "record": {
+            "_source": "fc2", "_id": "1234567", "number": number,
+            "title": title, "share_date": share_date,
+            "discription": [{"language": "en", "overview": overview}],
+            "cover_image": "https://images.example.test/poster.jpg",
+            "backdrop_images": ["https://art.example.test/backdrop.jpg"],
+        },
+        "actors": [],
+    }
+
+    class FC2Provider:
+        def search(self, found_number):
+            assert found_number == number
+            return deepcopy(packet)
+
+        def fetch(self, identity):
+            assert identity == "1234567"
+            return deepcopy(packet)
+
+    monkeypatch.setattr(
+        settings, "MOVIE_RENAME_FORMAT",
+        "{{title}}{% if year %} ({{year}}){% endif %}/{{title}}{% if year %}({{year}}){% endif %}{{fileExt}}",
+    )
+    import app.chain.scraping as scraping_module
+    image_client = OfflineImageClient()
+    monkeypatch.setattr(scraping_module, "_scraping_http_snapshot", lambda: image_client)
+    offline_plugin.init_plugin({
+        "enabled": True, "sources": ["fc2"], "storage": "local",
+        "recognize_dirs": str(source.parent), "target_path": str(library),
+        "transfer_type": "link", "handoff_mode": "discover",
+        "image_hosts": ["images.example.test", "art.example.test"],
+        "actress_subfolder": True,
+    })
+    offline_plugin._providers["fc2"] = FC2Provider()
+    assert offline_plugin._manual is not None
+
+    preview = offline_plugin._manual.preview(ManualPreviewRequest(
+        path=str(source), target_path=str(library), media_source="fc2",
+        transfer_type="link", library_category_folder=False,
+    ))
+    assert preview.summary.success == 1, preview
+    assert preview.preview_id
+    target = Path(preview.items[0].target)
+    assert target.parent.parent == library
+    assert target.parent.name == (f"{number} ({expected_year})" if expected_year else number)
+    assert target.name == (f"{number}({expected_year}).mkv" if expected_year else f"{number}.mkv")
+    assert preview.items[0].title == title
+    assert not target.exists()
+
+    from app.runtime.events import EventManager
+    from app.startup.initializers.modules import configure_host_event_handler_resolver
+    event_manager = EventManager()
+    configure_host_event_handler_resolver()
+    event_manager.start()
+    request.addfinalizer(event_manager.stop)
+    chain_probe = TransferChain()
+    request.addfinalizer(chain_probe.close_workers)
+    execution = offline_plugin._manual.execute(preview.preview_id)
+    assert execution.state in ("accepted", "completed"), execution
+
+    deadline = time.monotonic() + 10
+    status = offline_plugin._manual.status(preview.preview_id)
+    while time.monotonic() < deadline:
+        nfo_files = list(target.parent.glob("*.nfo"))
+        image_files = list(target.parent.glob("*.jpg"))
+        if target.exists() and nfo_files and len(image_files) >= 2 and status.state == "completed":
+            break
+        status = offline_plugin._manual.status(preview.preview_id)
+        time.sleep(0.05)
+    assert status.state == "completed", status
+
+    target_stat = target.stat()
+    assert (target_stat.st_dev, target_stat.st_ino) == (source_before.st_dev, source_before.st_ino)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == source_hash
+    source_after = source.stat()
+    assert (source_after.st_dev, source_after.st_ino, source_after.st_size, source_after.st_mtime_ns) == (
+        source_before.st_dev, source_before.st_ino, source_before.st_size, source_before.st_mtime_ns,
+    )
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
+
+    nfo_files = list(target.parent.glob("*.nfo"))
+    assert len(nfo_files) == 1
+    nfo = ET.parse(nfo_files[0]).getroot()
+    assert nfo.findtext("num") == number
+    assert nfo.findtext("uniqueid") == "1234567"
+    assert nfo.find("uniqueid").attrib.get("type") == "fc2"
+    assert nfo.findtext("title") == title
+    assert nfo.findtext("originaltitle") == title
+    assert nfo.findtext("plot") == overview
+    if expected_year:
+        assert nfo.findtext("year") == expected_year
+    else:
+        assert nfo.find("year") is None
+    assert nfo.findall("actor") == []
+    assert not source.with_suffix(".nfo").exists()
+
+    images = {path.name: path.read_bytes() for path in target.parent.glob("*.jpg")}
+    assert images["poster.jpg"] == NATIVE_IMAGES["https://images.example.test/poster.jpg"]
+    background_names = {"backdrop.jpg", "fanart.jpg"}.intersection(images)
+    assert background_names
+    assert all(images[name] == NATIVE_IMAGES["https://art.example.test/backdrop.jpg"]
+               for name in background_names)
+    assert images["poster.jpg"] != images[next(iter(background_names))]
+    from PIL import Image
+    for image_bytes in images.values():
+        with Image.open(BytesIO(image_bytes)) as image:
+            assert image.format == "JPEG"
+            image.verify()
+    assert set(image_client.urls) == set(NATIVE_IMAGES)

@@ -654,12 +654,14 @@ class ManualTransferWorkspace:
                     message = messages[cause]
                 items.append(ManualPreviewItem(source=str(path), success=False, message=message))
                 continue
+            fc2_identity = self.plugin._fc2_identity_matches(media, number)
+            actor_folder = actress_subfolder and not fc2_identity
             selected_actress = None
             actress_choice_mode = None
             effective_target = target
             actress_identity = None
             candidates = []
-            if actress_subfolder:
+            if actor_folder:
                 trusted_names, allowed_trusted = self.plugin.actress_evidence(media, number)
                 candidates = allowed_trusted if trusted_names is not None else actor_names(media)
                 requested_actress = request.actress_choices.get(str(path))
@@ -698,7 +700,7 @@ class ManualTransferWorkspace:
             ok = bool(success is True and row and row.get("success") is True
                       and row.get("source") == str(path) and row.get("source_storage") == "local"
                       and destination is not None and destination != path
-                      and (not actress_subfolder or child_directory_matches(
+                      and (not actor_folder or child_directory_matches(
                           target, selected_actress, actress_identity))
                       and not destination.exists() and not destination.is_symlink())
             items.append(ManualPreviewItem(
@@ -706,7 +708,7 @@ class ManualTransferWorkspace:
                 title=self._value(media, "title"), media_source=request.media_source,
                 media_id=str(media.media_id), poster_path=self._value(media, "poster_path"),
                 success=ok, message=None if ok else "原生预览未返回唯一且范围内的成功目标",
-                needs_actress_choice=bool(actress_subfolder and len(candidates) > 1),
+                needs_actress_choice=bool(actor_folder and len(candidates) > 1),
                 selected_actress=selected_actress, actor_candidates=candidates))
             if ok:
                 intents.append({"source": str(path), "target": str(destination),
@@ -801,6 +803,31 @@ class ManualTransferWorkspace:
                                                            failed=sum(i.state == "failed" for i in items)))
 
     @staticmethod
+    def _verified_fc2_without_actress(payload: dict) -> bool:
+        """Recognize only a persisted canonical FC2 identity with no actress child."""
+        try:
+            source = payload.get("media_source")
+            number = payload.get("number")
+            if (payload.get("actress_subfolder") is not True
+                    or payload.get("actress_name") is not None
+                    or payload.get("actress_directory_identity") is not None
+                    or source not in {"fc2", "fc2hub", "fc2ppvdb"}
+                    or not isinstance(number, str)
+                    or normalize_number(number) != number
+                    or not number.startswith("FC2-PPV-")):
+                return False
+            identity = number.removeprefix("FC2-PPV-")
+            expected_id = "id" + identity if source == "fc2hub" else identity
+            if str(payload.get("media_id")) != expected_id:
+                return False
+            target = Path(payload["target_root"])
+            return (target == Path(payload["actress_root"])
+                    and target == Path(payload["actress_parent_root"])
+                    and target.resolve(strict=True).is_dir())
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+
+    @staticmethod
     def _verify_manual_transfer(item: dict, intent: dict) -> bool:
         """Only confirm a stable regular hard link whose source version still matches."""
         try:
@@ -815,10 +842,12 @@ class ManualTransferWorkspace:
                 return False
             root = Path(intent["payload"]["target_root"]).resolve(strict=True)
             intent_payload = intent["payload"]
-            if (intent_payload.get("actress_subfolder") and not child_directory_matches(
-                    Path(intent_payload["actress_parent_root"]), intent_payload["actress_name"],
-                    intent_payload.get("actress_directory_identity"), allow_created=True)):
-                return False
+            if intent_payload.get("actress_subfolder"):
+                if not ManualTransferWorkspace._verified_fc2_without_actress(intent_payload):
+                    if (not intent_payload.get("actress_name") or not child_directory_matches(
+                            Path(intent_payload["actress_parent_root"]), intent_payload["actress_name"],
+                            intent_payload.get("actress_directory_identity"), allow_created=True)):
+                        return False
             if (not target.is_absolute() or ".." in target.parts or target == root
                     or not target.is_relative_to(root) or not target.resolve(strict=True).is_relative_to(root)
                     or target.is_symlink() or not target.is_file()):
@@ -861,8 +890,13 @@ class ManualTransferWorkspace:
                             or str(self._value(media, "media_id")) != intent["media_id"]):
                         failed = True
                         break
+                    fc2_identity = self.plugin._fc2_identity_matches(media, intent["number"])
+                    actor_folder = intent.get("actress_subfolder") and not fc2_identity
                     effective_target = Path(intent.get("actress_root") or target)
-                    if intent.get("actress_subfolder"):
+                    if not actor_folder and effective_target != target:
+                        failed = True
+                        break
+                    if actor_folder:
                         trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
                         choice_mode = intent.get("actress_choice_mode")
                         if choice_mode == "source_flag_unique":
@@ -934,8 +968,9 @@ class ManualTransferWorkspace:
                         or payload.get("boot_id") != self._boot_id
                         or not self._source_matches(intent)
                         or not self._target_matches(payload, target)
-                        or (intent.get("actress_subfolder") and not child_directory_matches(
-                            target, intent["actress_name"], intent.get("actress_directory_identity")))
+                        or (intent.get("actress_subfolder") and intent.get("actress_name")
+                            and not child_directory_matches(target, intent["actress_name"],
+                                                            intent.get("actress_directory_identity")))
                         or Path(intent["target"]).exists() or Path(intent["target"]).is_symlink()):
                     raise RuntimeError("源文件提交前发生变化")
                 media = self.plugin.recognize_media(meta=self._meta(path, intent["number"]),
@@ -945,7 +980,11 @@ class ManualTransferWorkspace:
                         or str(self._value(media, "media_id")) != intent["media_id"]):
                     raise RuntimeError("提交时原生身份回查不一致")
                 effective_target = Path(intent.get("actress_root") or target)
-                if intent.get("actress_subfolder"):
+                fc2_identity = self.plugin._fc2_identity_matches(media, intent["number"])
+                actor_folder = intent.get("actress_subfolder") and not fc2_identity
+                if not actor_folder and effective_target != target:
+                    raise RuntimeError("FC2 目标不应包含演员目录")
+                if actor_folder:
                     trusted_names, allowed = self.plugin.actress_evidence(media, intent["number"])
                     choice_mode = intent.get("actress_choice_mode")
                     if choice_mode == "source_flag_unique":
@@ -969,8 +1008,8 @@ class ManualTransferWorkspace:
                         or not self._source_matches(intent) or not self._target_matches(payload, target)):
                     raise RuntimeError("提交前插件代次或交接范围已变化")
                 def continue_callback(intent=intent, payload=payload, target=target, path=path,
-                                      generation=payload["generation"]):
-                    child_ok = (not intent.get("actress_subfolder") or child_directory_matches(
+                                      generation=payload["generation"], actor_folder=actor_folder):
+                    child_ok = (not actor_folder or child_directory_matches(
                         target, intent["actress_name"], intent.get("actress_directory_identity")))
                     return (child_ok and self._active() and payload.get("generation") == generation
                             and self.plugin._generation == generation

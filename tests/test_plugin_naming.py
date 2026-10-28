@@ -138,3 +138,80 @@ def test_javbus_rename_hook_skips_hosts_without_the_optional_event(
 
     assert plugin._register_javbus_rename_hook() is False
     assert event_manager.listeners == {}
+
+
+def test_fc2_rename_uses_owned_canonical_number_and_preserves_full_metadata(
+        monkeypatch, plugin_host_context):
+    plugin = XiaojiejieScraping()
+    plugin._enabled = True
+    plugin._active_sources = ("fc2",)
+    media = SimpleNamespace(media_source="fc2", media_id="1234567", type=MediaType.MOVIE,
+                            title="FC2-PPV-1234567 Complete product title",
+                            original_title="FC2-PPV-1234567 Complete product title",
+                            names=["FC2-PPV-1234567"])
+    packet = {"packet": {"source": "fc2", "number": "FC2-PPV-1234567", "record": {
+        "_id": "1234567", "_source": "fc2", "number": "FC2-PPV-1234567"}},
+        "projected": {"year": "2024"}}
+    monkeypatch.setattr(plugin, "_owned", lambda _media: packet)
+    event = _rename_event(media)
+    plugin._on_transfer_rename_build(_event_wrapper(event))
+    assert event["rename_dict"]["title"] == "FC2-PPV-1234567"
+    assert event["rename_dict"]["year"] == "2024"
+    assert media.title == "FC2-PPV-1234567 Complete product title"
+    assert media.original_title == "FC2-PPV-1234567 Complete product title"
+
+
+def test_fc2_rename_requires_owned_same_source_and_number(monkeypatch, plugin_host_context):
+    plugin = XiaojiejieScraping()
+    plugin._enabled = True
+    plugin._active_sources = ("fc2",)
+    media = SimpleNamespace(media_source="fc2", media_id="1234567", type=MediaType.MOVIE,
+                            names=["FC2-PPV-1234567"])
+    packet = {"packet": {"source": "fc2", "number": "FC2-PPV-1234568", "record": {
+        "_id": "1234567", "_source": "fc2", "number": "FC2-PPV-1234567"}}}
+    monkeypatch.setattr(plugin, "_owned", lambda _media: packet)
+    event = _rename_event(media)
+    before = dict(event["rename_dict"])
+    plugin._on_transfer_rename_build(_event_wrapper(event))
+    assert event["rename_dict"] == before
+
+
+def test_fc2_rename_does_not_infer_missing_year(monkeypatch, plugin_host_context):
+    plugin = XiaojiejieScraping()
+    plugin._enabled = True
+    plugin._active_sources = ("fc2",)
+    media = SimpleNamespace(media_source="fc2", media_id="1234567", type=MediaType.MOVIE,
+                            names=["FC2-PPV-1234567"])
+    packet = {"packet": {"source": "fc2", "number": "FC2-PPV-1234567", "record": {
+        "_id": "1234567", "_source": "fc2", "number": "FC2-PPV-1234567"}},
+        "projected": {"year": None}}
+    monkeypatch.setattr(plugin, "_owned", lambda _media: packet)
+    event = _rename_event(media)
+    plugin._on_transfer_rename_build(_event_wrapper(event))
+    assert event["rename_dict"]["title"] == "FC2-PPV-1234567"
+    assert event["rename_dict"]["year"] == ""
+
+
+def test_fc2_source_registers_formatter_hook(monkeypatch, tmp_path, plugin_host_context):
+    plugin = XiaojiejieScraping()
+    event_manager = FakeEventManager()
+    monkeypatch.setattr(plugin, "get_data_path", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "eventmanager", event_manager, raising=False)
+    plugin.init_plugin({"enabled": True, "sources": ["fc2"]})
+    assert sum(map(len, event_manager.listeners.values())) == 1
+    plugin.stop_service()
+    assert event_manager.listeners == {}
+
+
+def test_fc2_identity_matcher_reads_owned_canonical_number_not_alias_order(monkeypatch, plugin_host_context):
+    plugin = XiaojiejieScraping()
+    plugin._enabled = True
+    plugin._active_sources = ("fc2",)
+    media = SimpleNamespace(media_source="fc2", media_id="1234567",
+                            names=["1234567", "FC2-PPV-1234567"])
+    packet = {"packet": {"number": "FC2-PPV-1234567", "record": {
+        "_id": "1234567", "_source": "fc2", "number": "FC2-PPV-1234567"}}}
+    monkeypatch.setattr(plugin, "_owned", lambda _media: packet)
+    assert plugin._fc2_identity_matches(media, None)
+    assert plugin._fc2_identity_matches(media, "FC2-PPV-1234567")
+    assert not plugin._fc2_identity_matches(media, "1234567")

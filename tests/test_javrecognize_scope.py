@@ -81,11 +81,12 @@ def test_missing_root_does_not_mask_later_valid_root(scope_context, tmp_path):
     assert matches_scope(scope_context, "local", roots) is True
 
 
-def test_registered_source_status_marks_implemented_adapters_as_offline_only():
+def test_registered_source_status_preserves_offline_contracts_and_marks_fc2_limited_live():
     statuses = {entry.key: entry for entry in PROVIDERS}
     metadata_sources = {"manko", "fanza", "mgstage", "duga", "sod", "javbus", "jav321", "fc2hub", "fc2ppvdb"}
-    assert set(statuses) == metadata_sources | {"gfriends"}
+    assert set(statuses) == metadata_sources | {"fc2", "gfriends"}
     assert all(statuses[key].state == "offline_adapter" for key in metadata_sources)
+    assert statuses["fc2"].state == "limited_live"
     assert statuses["gfriends"].purpose == "actor_images"
     assert statuses["gfriends"].state == "offline_adapter"
     assert "metatube" not in statuses

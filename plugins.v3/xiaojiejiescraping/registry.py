@@ -41,6 +41,7 @@ PROVIDERS = (
     ProviderStatus("javbus", "JavBus", "offline_adapter"),
     ProviderStatus("jav321", "Jav321", "offline_adapter"),
     ProviderStatus("fc2hub", "FC2Hub", "offline_adapter"),
+    ProviderStatus("fc2", "FC2官方", "limited_live"),
     ProviderStatus("fc2ppvdb", "FC2PPVDB / FC2CMADB", "offline_adapter"),
     ProviderStatus("gfriends", "GFriends", "offline_adapter", "actor_images"),
 )

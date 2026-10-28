@@ -636,6 +636,14 @@ def test_source_configuration_registers_only_available_selected_adapters_in_orde
     assert plugin.get_module() == {}
 
 
+def test_fc2_host_source_label_matches_limited_live_configuration_status(plugin):
+    plugin.init_plugin({"enabled": True, "sources": ["fc2"]})
+    assert plugin.get_media_source() == [{
+        "name": "FC2官方（有限商品页实测）", "media_source": "fc2",
+        "media_types": [MediaType.MOVIE.value],
+    }]
+
+
 @pytest.mark.parametrize("sources", ["", [], None, ["unknown", "not_implemented"]])
 def test_empty_or_invalid_source_configuration_does_not_invent_default_queries(plugin, sources):
     plugin.init_plugin({"enabled": True, "sources": sources})

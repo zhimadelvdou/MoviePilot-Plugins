@@ -2,13 +2,13 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.17 的 JavBus 整理命名统一使用番号，保留现有年份与版本模板；完整标题仍用于搜索、预览和 NFO。0.8.16 在手动来源浏览中显示已核实的整理状态，区分目录全部、部分和检查不完整，仅查询已有记录；状态仅说明文件传输，不代表刮削或 NFO/图片完成。0.8.15 集成手动整理界面调整：目录浏览默认按修改时间从旧到新排序；有效预览后可直接点击“确认并整理”，无需额外勾选。预览过期或选择变更后仍须重新预览，异常/未知执行结果仍防止重复提交。0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API 与女优证据，以及完整公开文件清单（仅当所有文件 ID 缺失时使用内部位置校验，混合 ID 仍拒绝）兼容保持。
+这是开发版本。0.8.18 新增 FC2 官方商品页匿名 JSON-LD 元数据源 `fc2`（显示名“FC2官方”）：按官方 article URL 与 Product sku/productID 精确核对，只映射同一 Product 的标题、简介和图片候选；无演员及结构化日期时留空，seller 不作为演员。2026-10-28 已在 DSM `192.168.100.133` 的 MoviePilot V2 部署并启用；FC2-PPV-1229107 同步/异步查询、原生搜索与详情及封面 HTTPS 解码均通过单样本验收。官方 metadata 的 HTTP 图片候选仅对精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不发起 HTTP 图片请求；最终主机仍须经 `image_hosts` 精确批准。该验收不覆盖其它商品或旧内容，也不代表完整 NFO、媒体整理或自动下载链已验收。详见[FC2 官方来源部署记录](../records/fc2-official-source-2026-10-28.md)。0.8.17 的 JavBus 整理命名统一使用番号，保留现有年份与版本模板；完整标题仍用于搜索、预览和 NFO。0.8.16 在手动来源浏览中显示已核实的整理状态，区分目录全部、部分和检查不完整，仅查询已有记录；状态仅说明文件传输，不代表刮削或 NFO/图片完成。0.8.15 集成手动整理界面调整：目录浏览默认按修改时间从旧到新排序；有效预览后可直接点击“确认并整理”，无需额外勾选。预览过期或选择变更后仍须重新预览，异常/未知执行结果仍防止重复提交。0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API 与女优证据，以及完整公开文件清单（仅当所有文件 ID 缺失时使用内部位置校验，混合 ID 仍拒绝）兼容保持。
 
 0.8.13 延续 0.8.12 的女主演证据规则，并在 JavBus 详情数据中按顺序提取最多 8 个去重 HTTPS `samples[].src` 图片候选。手动搜索/详情展示时，JavBus 封面和背景字段可使用限时签名的同源图片路由；路由只允许当前 `image_hosts` 已批准的 JavBus 封面/样图及 DMM 视频样图 URL，固定发送 JavBus 根页 Referer，不接收账号 Cookie，并限制响应大小、图片 MIME 和解码尺寸。签名 URL 签发有效期为 1 小时，插件配置重载即失效。该路由只服务搜索和详情展示；`metadata_img` 仍按既有合同返回原始上游 HTTPS URL，由 MoviePilot 原生下载，宿主下载是否成功仍取决于宿主访问条件，未在此版本承诺。完整演员 cast、女优来源证据、NFO 与自动整理边界不变。JavBus JSON API 继续使用单独配置的基址，默认留空；须显式选择来源才参与识别。API 与图片代理验证不代表完整刮削、整理或部署验收；自动整理保持默认关闭、默认只读发现。
 
 ## 功能与边界
 
-- 直连元数据：Manko、FANZA、MGStage、DUGA、SOD、JavBus、Jav321、FC2Hub、FC2PPVDB/FC2CMADB
+- 直连元数据：Manko、FANZA、MGStage、DUGA、SOD、JavBus、Jav321、FC2官方、FC2Hub、FC2PPVDB/FC2CMADB
 - 演员缩略图：可选 GFriends 官方公开索引，写入 NFO 的远程 thumb；插件不下载头像
 - 原生手动入口：注册来源列表及同步/异步搜索、识别、图片、NFO 方法，供 MoviePilot 手动整理和刮削调用
 - 插件独立手动页：从本地文件系统选源文件/目录和既有目标，指定已启用来源后预览并明确提交硬链接整理；可选按女主演分目录，自动识别目录只作快捷参考
@@ -16,7 +16,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 - 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
 - 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
 
-除 Manko 两个现场样本的搜索、刮削与整理验证外，其他来源目前仅有**离线适配验证**。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战绕过。遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；Manko 同番号多 ID 时只接受首个完整数据包，不拼接不同 ID 的字段。
+除 Manko 两个现场样本外，FC2 官方来源仅在上述 NAS 环境对一个商品样本完成查询与图片验证；尚未覆盖其它 FC2 商品、旧内容或部署环境。其它来源的运行验收范围见对应专题记录。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战交互。FC2 页面仅被动附带成人提示、同时公开返回有效且精确匹配的 Product 时仍可读取；没有有效 Product/精确身份的验证门页返回空。其它来源遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；Manko 同番号多 ID 时只接受首个完整数据包，不拼接不同 ID 的字段。
 
 ## 来源状态
 
@@ -28,6 +28,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 | DUGA | 原生 URL、mpn 与详情字段；未知布局失败关闭 |
 | SOD | 产品详情表；不执行年龄/会话握手 |
 | JavBus/Jav321 | JavBus 使用用户配置的 API JSON 基址直连，需严格核对详情番号；不使用 Cookie/账号、不抓 JavBus 页面 HTML。JavBus `stars` 按来源女优目录语义生成有序候选，过滤不安全姓名/ID并将身份冲突降为无可信候选；不逐人请求 profile、不推断独立性别认证。API 具体状态需在部署环境验证；未实站验收 |
+| FC2官方 | 匿名读取 `adult.contents.fc2.com/article/{id}/` 的 Product JSON-LD，校验 sku/productID；不推断演员或日期，也不把 seller 作为演员。该 NAS 上 FC2-PPV-1229107 的同步/异步元数据、原生搜索与详情及 HTTPS 封面解码已通过单样本验收。HTTP 图片 URL 仅允许精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不请求 HTTP 图片；HTTPS 主机仍须经 `image_hosts` 精确批准。未验证其它商品、旧内容、NFO/媒体写入或完整自动链；响应完整读取后按 2 MB 解析上限拒绝超大页面 |
 | FC2Hub | `id{number}` permalink 及经搜索确认的当前详情路由；不猜新版 slug |
 | FC2PPVDB / FC2CMADB | 匿名普通 GET `/articles/{video_id}` 的初始 Inertia `Articles/Show` 合同；核对页面路径和 video_id，不把 article.id 当产品 ID；不请求有访问争议的延迟演员接口 |
 | GFriends | 官方 `Filetree.json`：演员名精确匹配、按质量顺序选图；只取公开索引 |

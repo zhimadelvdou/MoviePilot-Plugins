@@ -22,6 +22,7 @@ from .diagnostics import diagnose
 from .direct_primary import FANZAProvider, MGStageProvider, DUGAProvider, SODProvider
 from .direct_secondary import JavBusProvider, Jav321Provider, FC2HubProvider
 from .fc2ppvdb import FC2PPVDBProvider
+from .fc2_official import FC2OfficialProvider
 from .scope import RecognitionContext, matches_scope
 from .registry import PROVIDERS
 from .discovery import DiscoveryJournal, exact_tags, owned_torrent_files, torrent_files
@@ -44,7 +45,7 @@ class XiaojiejieScraping(_PluginBase):
     plugin_name = "Xiaojiejie-Scraping"
     plugin_desc = "直连多来源刮削、插件独立手动整理入口与 qBittorrent 发现"
     plugin_icon = ""
-    plugin_version = "0.8.17"
+    plugin_version = "0.8.18"
     plugin_author = "zhimadelvdou（基于 hyuan280 方案重写）"
     author_url = "https://github.com/zhimadelvdou/MoviePilot-Plugins"
     plugin_config_prefix = "xiaojiejiescraping_"
@@ -121,7 +122,8 @@ class XiaojiejieScraping(_PluginBase):
             self._provider = MankoProvider() if self._enabled else None
             self._providers = {"fanza": FANZAProvider(), "mgstage": MGStageProvider(), "duga": DUGAProvider(),
                                "sod": SODProvider(), "javbus": JavBusProvider(api_url=config.get("javbus_api_url") or ""), "jav321": Jav321Provider(),
-                               "fc2hub": FC2HubProvider(), "fc2ppvdb": FC2PPVDBProvider()} if self._enabled else {}
+                               "fc2hub": FC2HubProvider(), "fc2ppvdb": FC2PPVDBProvider(),
+                               "fc2": FC2OfficialProvider()} if self._enabled else {}
             requested = self._lines(config.get("sources", [SOURCE]))
             self._active_sources = tuple(source for source in requested if source in self._adapters())
             self._cache = JsonCache(self.get_data_path() / "metadata-v2.json") if self._enabled else None
@@ -680,7 +682,10 @@ class XiaojiejieScraping(_PluginBase):
 
     def get_media_source(self) -> list[dict]:
         """供宿主原生手动整理/刮削选择，不代表已开启自动任务触发。"""
-        return [{"name": next((status.label for status in PROVIDERS if status.key == source), source) + "（离线适配）", "media_source": source, "media_types": [MediaType.MOVIE.value]} for source in self._active_sources] if self._enabled else []
+        statuses = {status.key: status for status in PROVIDERS}
+        return [{"name": statuses[source].label + ("（有限商品页实测）" if statuses[source].state == "limited_live" else "（离线适配）"),
+                 "media_source": source, "media_types": [MediaType.MOVIE.value]}
+                for source in self._active_sources] if self._enabled else []
 
     def recognize_media(self, meta=None, mtype=None, media_source=None, media_id=None, episode_group=None, cache=True):
         """显式来源查询用于手动操作及已有身份回查；不推断调用方是否手动。"""
@@ -1315,7 +1320,7 @@ class XiaojiejieScraping(_PluginBase):
         fields = [
             {"component": "VAlert", "props": {"type": "warning", "text": "实验版：手动整理/刮削可明确选择来源。自动模式默认只读发现；预览会查询来源及宿主缓存但不搬文件，执行须完整配置。来源与真实整理尚未实站验收。"}},
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用已完成的来源能力（JavBus API 局域网直连；其他来源沿用既有代理）"}},
-            {"component": "VSelect", "props": {"model": "sources", "multiple": True, "chips": True, "label": "元数据来源（选择顺序即查询顺序，均未实站验收）", "items": [{"title": status.label, "value": status.key} for status in PROVIDERS if status.purpose == "metadata" and status.state == "offline_adapter"]}},
+            {"component": "VSelect", "props": {"model": "sources", "multiple": True, "chips": True, "label": "元数据来源（选择顺序即查询顺序；FC2官方仅有有限商品页实测）", "items": [{"title": status.label, "value": status.key} for status in PROVIDERS if status.purpose == "metadata" and status.state in ("offline_adapter", "limited_live")]}},
             {"component": "VTextField", "props": {"model": "javbus_api_url", "label": "JavBus API 基址（局域网直连；例 http://NAS地址:8922；留空则 JavBus 不可用）"}},
             {"component": "VSelect", "props": {"model": "storage", "label": "存储", "items": [{"title": "本地存储", "value": "local"}]}},
             {"component": "VTextarea", "props": {"model": "recognize_dirs", "label": "触发目录：每行一个绝对路径，含子目录；仅真实文件上下文生效"}},
@@ -1338,6 +1343,6 @@ class XiaojiejieScraping(_PluginBase):
             {"component": "VSwitch", "props": {"model": "actor_images", "label": "GFriends 演员缩略图（还需批准 raw.githubusercontent.com 图片主机）"}},
             {"component": "VSwitch", "props": {"model": "actress_subfolder", "label": "按女主演分目录（默认来源首位；手动预览可改选）"}},
             {"component": "VTextarea", "props": {"model": "image_hosts", "label": "批准的图片 HTTPS 主机，每行一个；空值不提供图片地址"}},
-            {"component": "VAlert", "props": {"type": "info", "text": "; ".join(status.label + ("：离线适配，未实站验收" if status.state == "offline_adapter" else "：暂不可用，现行接口待核实" if status.state == "blocked" else "：待实现") for status in PROVIDERS)}},
+            {"component": "VAlert", "props": {"type": "info", "text": "; ".join(status.label + ("：仅有限商品页实测，旧内容及部署环境未覆盖" if status.state == "limited_live" else "：离线适配，未实站验收" if status.state == "offline_adapter" else "：暂不可用，现行接口待核实" if status.state == "blocked" else "：待实现") for status in PROVIDERS)}},
         ]
         return fields, {"enabled": False, "sources": ["manko"], "javbus_api_url": "", "storage": "local", "recognize_dirs": "", "automatic_match_mode": "tag_or_path", "image_hosts": "", "discovery_enabled": False, "auto_new_only": True, "downloader": "", "torrent_tag": "", "torrent_category": "", "actor_images": False, "actress_subfolder": False, "handoff_mode": "discover", "target_path": "", "transfer_type": "", "ownership_ack": False, "auxiliary_ack": False, "handoff_limit": 1}

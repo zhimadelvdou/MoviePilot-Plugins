@@ -2,7 +2,23 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .venv/
 .env
+.env.*
+!.env.example
+!.env.*.example
 .ruff_cache/
+
+# Rebuildable web dependencies and caches; keep runtime plugin dist tracked.
+node_modules/
+.vite/
+.mypy_cache/
+
+# Local workspace and operational data; not plugin release assets.
+/.ssh/
+/.private/
+/outputs/
+/logs/
+/tmp/

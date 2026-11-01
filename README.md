@@ -2,7 +2,7 @@
 
 MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配置，通过已有 qBittorrent 连接筛选完成任务，识别后交给 MoviePilot 原生整理。**不复用 MetaTube，不修改 MoviePilot 核心，不自行搬运媒体。**
 
-这是开发版本。0.8.19 对已验证 FC2 canonical 番号不建立演员目录，并让原生 formatter 使用可信番号及已有年份模板；完整来源标题及 NFO title/overview 保留。年份只取已验证的 projected year，缺失时 formatter year 置空。手动与自动流程均在执行重核身份后应用该规则，非 FC2 演员目录门禁不变。0.8.19 已部署验证并完成 FC2 原生预览，详见[FC2目录整理记录](../records/fc2-layout-2026-10-28.md)。0.8.18 新增 FC2 官方商品页匿名 JSON-LD 元数据源 `fc2`（显示名“FC2官方”）：按官方 article URL 与 Product sku/productID 精确核对，只映射同一 Product 的标题、简介和图片候选；无演员及结构化日期时留空，seller 不作为演员。2026-10-28 已在 DSM `192.168.100.133` 的 MoviePilot V2 部署并启用；FC2-PPV-1229107 同步/异步查询、原生搜索与详情及封面 HTTPS 解码均通过单样本验收。官方 metadata 的 HTTP 图片候选仅对精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不发起 HTTP 图片请求；最终主机仍须经 `image_hosts` 精确批准。该验收不覆盖其它商品或旧内容，也不代表完整 NFO、媒体整理或自动下载链已验收。详见[FC2 官方来源部署记录](../records/fc2-official-source-2026-10-28.md)。0.8.17 的 JavBus 整理命名统一使用番号，保留现有年份与版本模板；完整标题仍用于搜索、预览和 NFO。0.8.16 在手动来源浏览中显示已核实的整理状态，区分目录全部、部分和检查不完整，仅查询已有记录；状态仅说明文件传输，不代表刮削或 NFO/图片完成。0.8.15 集成手动整理界面调整：目录浏览默认按修改时间从旧到新排序；有效预览后可直接点击“确认并整理”，无需额外勾选。预览过期或选择变更后仍须重新预览，异常/未知执行结果仍防止重复提交。0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API 与女优证据，以及完整公开文件清单（仅当所有文件 ID 缺失时使用内部位置校验，混合 ID 仍拒绝）兼容保持。
+这是开发版本。0.8.19 对已验证 FC2 canonical 番号不建立演员目录，且让原生 formatter 使用可信番号和已验证年份模板；年份只取已验证的 projected year，缺失时 formatter year 置空；完整来源标题及 NFO title/overview 保留。手动与自动流程均在执行前重核身份，非 FC2 的演员目录门禁保持不变；该版本已完成现场部署验证及 FC2 原生预览，不代表完整媒体整理或自动链已验收；规格见[FC2整理规则](.scratch/fc2-layout/spec.md)。0.8.18 新增 FC2 官方商品页匿名 JSON-LD 元数据源 `fc2`，按 article URL 与 Product sku/productID 精确核对，只映射同一 Product 的标题、简介及图片候选；无演员或结构化日期时留空，seller 不映射为演员。该版本曾部署启用，并完成一个官方商品样本的同步/异步查询、原生搜索/详情与 HTTPS 封面解码验收；不覆盖其它商品、旧内容、完整 NFO/媒体整理或自动下载链。官方 JSON-LD 的 HTTP 图片候选仅对精确主机 `storage57000.contents.fc2.com` 改写为同路径 HTTPS，不发起 HTTP 图片请求；最终主机仍须经 `image_hosts` 精确批准；规格见[FC2官方来源](.scratch/fc2-official-source/spec.md)。原始部署截图、运行日志和审计收据由仓库外工作空间维护。0.8.17 统一 JavBus 整理命名并保留既有年份/版本模板；0.8.16 的状态提示只说明文件传输；0.8.15 预览和选择变更门禁保持；0.8.14 的 qBittorrent 分类筛选、JavBus 配置 API、女优证据及完整文件清单门禁保持。
 
 0.8.13 延续 0.8.12 的女主演证据规则，并在 JavBus 详情数据中按顺序提取最多 8 个去重 HTTPS `samples[].src` 图片候选。手动搜索/详情展示时，JavBus 封面和背景字段可使用限时签名的同源图片路由；路由只允许当前 `image_hosts` 已批准的 JavBus 封面/样图及 DMM 视频样图 URL，固定发送 JavBus 根页 Referer，不接收账号 Cookie，并限制响应大小、图片 MIME 和解码尺寸。签名 URL 签发有效期为 1 小时，插件配置重载即失效。该路由只服务搜索和详情展示；`metadata_img` 仍按既有合同返回原始上游 HTTPS URL，由 MoviePilot 原生下载，宿主下载是否成功仍取决于宿主访问条件，未在此版本承诺。完整演员 cast、女优来源证据、NFO 与自动整理边界不变。JavBus JSON API 继续使用单独配置的基址，默认留空；须显式选择来源才参与识别。API 与图片代理验证不代表完整刮削、整理或部署验收；自动整理保持默认关闭、默认只读发现。
 
@@ -16,7 +16,7 @@ MoviePilot V3 直连多来源刮削插件。使用 MoviePilot 自带 WebUI 配�
 - 原生交接：先预览，完整核对后调用公开 `TransferChain.do_transfer`；仅支持复制和硬链接，保留做种源文件
 - 持久状态：插件独立 SQLite 账本原子占位，区分预览、受理、完成、失败和不确定；未知结果不会盲目重提
 
-除 Manko 两个现场样本外，FC2 官方来源仅在上述 NAS 环境对一个商品样本完成查询与图片验证；尚未覆盖其它 FC2 商品、旧内容或部署环境。其它来源的运行验收范围见对应专题记录。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战交互。FC2 页面仅被动附带成人提示、同时公开返回有效且精确匹配的 Product 时仍可读取；没有有效 Product/精确身份的验证门页返回空。其它来源遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；Manko 同番号多 ID 时只接受首个完整数据包，不拼接不同 ID 的字段。
+FC2 官方来源目前仅有一个商品样本完成查询与图片验证，尚未覆盖其它商品、旧内容或完整部署环境；NFO/媒体写入和完整自动下载链也未验收。Manko 的实例验收范围有限。仓库现有规格与 Issue 上下文保留；原始部署截图、运行日志和审计收据由仓库外工作空间维护。本 README 区分已实现合同、样本验收和未验收边界。不执行 JavaScript、年龄确认、登录、Cookie 认证、CAPTCHA 或反爬挑战交互。FC2 页面仅被动附带成人提示、同时公开返回有效且精确匹配的 Product 时仍可读取；没有有效 Product 或精确身份的验证门页返回空。其它来源遇到访问门槛、布局变化、身份矛盾或搜索分页无法证明完整性时返回空；Manko 同番号多 ID 时只接受首个完整数据包，不混合不同 ID 字段。
 
 ## 来源状态
 
@@ -51,7 +51,7 @@ FC2PPVDB 起初因迁站和现行响应合同不明而暂缓；随后找到[当�
 | --- | --- | --- |
 | enabled | false | 启用插件能力；初始化不联网 |
 | sources | Manko | 多选元数据来源，选择顺序即自动查询顺序；JavBus 需配置 API 基址并显式保存启用 |
-| javbus_api_url | 空 | JavBus API 基址，例如 `http://NAS地址:8922`；留空时 JavBus 查询不可用，不含路径查询参数或认证信息 |
+| javbus_api_url | 空 | 用户配置的 JavBus API JSON 基址，例如 `http://api-host:8922`；留空时 JavBus 查询不可用，不含路径查询参数或认证信息 |
 | storage | local | 当前只支持本地挂载文件，暂不接受远程存储 |
 | recognize_dirs | 空 | 每行一个 MoviePilot 容器内绝对输入目录，含子目录 |
 | automatic_match_mode | 新配置默认 tag_or_path；旧配置缺省 tag_and_path | 自动匹配来源：tag、path、tag_or_path 或 tag_and_path。OR 模式至少需标签或路径之一；tag-only 从宿主映射的任务路径建立本次范围 |
@@ -165,11 +165,11 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 0.8.9 多位可信女主演时，自动整理与手动预览默认按原始来源顺序选择第一位。手动页面允许改选可信候选，变更选择会使旧预览和确认失效，必须重新预览；执行前再次核验默认候选仍为首位，手动候选仍有本次原始 `avdbs_actor is True` 标记且匹配当前 cast。无可信证据、非法选择或证据变化均失败关闭；NFO 继续写入完整演员 cast。官方 MoviePilot V3 SDK 全组为 1552 passed、44 failed（7 subtests）；44 个失败均位于未修改的 `test_javrecognize_provider.py`，与 0.8.8 基线失败集合完全一致，且该 provider 与其测试文件未变。Vue 组件测试 45/45 通过，isolated production build 成功；runtime dist 增加 4 个带 hash 资产并更新 index 与 remoteEntry，保留旧 hash 资产。
 
-2026-10-24 Chrome 现场 preview：SONE-288 默认选角为葵司，结果 `1 success / 0 failed`，目标为 `/media/Link/AV/葵司/SONE-288 (2024)/SONE-288(2024).mp4`；手动改选坂道美琉后页面提示重新预览且禁用确认，重新 preview 同样 `1 success / 0 failed`，目标为 `/media/Link/AV/坂道美琉/SONE-288 (2024)/SONE-288(2024).mp4`。未确认或执行，未发生 transfer/scrape；源文件 stat 前后精确相同、`nlink=1`，且未创建目标目录。0.8.9 已部署，77 个 runtime 文件；部署审计保护项通过。preview 后审计中 core、public、config、binding、media 保持不变，ledger/cache 变化符合预览与 GET 的预期。前两次来源请求返回 `transport_unavailable`，随后相同配置连通，GET 和两次预览成功；具体网络原因未定位。现场材料：[默认预览](../outputs/manko-default-first-actress-20261024/sone288-default-first.jpg)、[手动改选预览](../outputs/manko-default-first-actress-20261024/sone288-manual-second.jpg)、[结果证明](../outputs/manko-default-first-actress-20261024/sone288-preview-result.jpg)、[preview 后审计](../outputs/manko-default-first-actress-20261024/previewed-audit.log)。真实新下载自动全流程仍未验收。
+2026-10-24 浏览器现场验收：默认候选预览结果为 `1 success / 0 failed`；手动更改候选后页面要求重新预览并禁用确认，重新预览同样为 `1 success / 0 failed`。未确认或执行，没有 transfer/scrape，也未创建目标目录。0.8.9 已部署，77 个 runtime 文件，部署审计保护项通过；预览后 core、public、config、binding、media 保持，ledger/cache 变化符合预览与 GET 的预期。前两次来源请求为 `transport_unavailable`，之后相同配置下 GET 与两次预览成功，原因未定位。原始部署截图、运行日志和审计收据由仓库外工作空间维护。真实新下载自动全流程仍未验收。
 
 0.8.7 按本次识别的 Manko packet `actors[*].avdbs_actor is True` 选择女主演；数值 1、字符串 `true`、false 或缺失均不满足。可信候选仅用于目录选择，NFO 保留完整演员列表。执行时自动选择须仍为唯一候选；手动选择须仍匹配且保持 true 标记，不相关候选变化不会使其失效。验证：官方 MoviePilot V3 SDK 定向测试 `372 passed, 7 subtests`；前端测试 `44/44`，production build 成功。候选 1 的 6 个失败是 SDK `MediaInfo.to_dict()` 暴露动态私有属性；候选 2 改用插件内弱引用证据映射后全组通过。新版页面现场 ABF-382 自动选角预览为 1 success/0 failed，未执行整理；ADN-765 预览在既有来源身份候选歧义处停止，未进入女主演规则判定。部署审计摘要及证据链接见上文。
 
-0.8.8 将同番号多 ID 选择改为 API 顺序下的完整数据包选择，不按 ID 最小值、译文数量或未映射字段差异择优，也不拼接记录。正式 MoviePilot V3 SDK 定向回归 `503 passed, 7 subtests`。已部署生产并审计 73 runtime 文件；部署清单中 core 有 6 个文件、public 有 1167 个文件；配置与 binding revision 9、3 个下载源及对应媒体、3 份 ledger 和两份 metadata 缓存均保持，自动整理 off、unarmed、queue 0。现场 `GET /media/search` 的 ADN-765 与 ADN-775 各返回 1 项且标题、简介、图像、日期及时长字段完整；前后状态与备份基线均保持。证据见[GET smoke](../outputs/manko-scrape-data-selection-20261024/live-search-smoke.log)和[最终审计](../outputs/manko-scrape-data-selection-20261024/final-audit.jsonl)。无前端改动，因此未新增前端测试或 build；本次未做 Chrome 新 UI 验收、preview、transfer 或 scrape。
+0.8.8 将同番号多 ID 选择改为按 API 顺序选择首个完整数据包，不按 ID、译文数量或未映射字段择优，也不拼接记录。正式 MoviePilot V3 SDK 定向回归 `503 passed, 7 subtests`。已部署并审计 73 个 runtime 文件；配置、binding revision、下载源及相应媒体、ledger 和 metadata 缓存均保持，自动整理 off、unarmed、queue 0。两个样本的现场 `GET /media/search` 各返回一条完整记录；前后状态和备份基线保持。无前端改动，未新增前端测试或 build；本次也未做新 UI 验收、preview、transfer 或 scrape。选择合同见[Manko完整数据包规格](.scratch/manko-scrape-data-selection/spec.md)，原始部署截图、运行日志和审计收据由仓库外工作空间维护。
 
 0.8.6 在独立目录浏览器中支持名称升/降序、修改时间新/旧排序及文件大小大/小排序，目录始终优先；同名和主键相同时以名称/路径稳定排序，无效或缺失的数值元数据置于同组末尾。浏览项目的 `modify_time`（Unix 秒）与 `size`（字节）是可空返回字段，旧响应仍兼容；前端排序只处理当前目录列表，不额外请求接口或改动手动选择路径。
 
@@ -177,7 +177,7 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 0.8.3 当时在完整等价检查中合并互补的 Manko 标题与简介译文，保留最小原生 ID；同语言冲突、重复语言项、无效译文结构、无共同语言锚点或其它字段不一致时仍拒绝自动合并。只含平面标题的旧记录仍可通过插件识别和手动搜索；该历史策略已由 0.8.8 的 API 顺序完整数据包策略取代。
 
-0.8.4 增加可选女主演目录：目录名只来自完整 ATTACKERS 官方“女優”行与本片演员的精确匹配；信息不足时要求手动选择，自动整理明确停止。预览/执行持续复核演员选择和子目录安全性，默认保持关闭。2026-10-23 验证通过：官方 V3 SDK 隔离合成回归 `1552 passed, 7 subtests`（含 synthetic real-native 执行和完整刮削），Vue 组件测试 `36/36`，dist build 成功。该日部署阶段，ADN-765 与 ADN-775 在无 ID、无人工选择时的 NAS preview 均成功；当日仅做 preview，没有执行整理。2026-10-24 随后通过 MoviePilot 原生 reorganize 接口完成两部影片整理，硬链接、源 SHA、NFO 和图像审计通过，详见[真实整理记录](../records/manko-actress-reorganize-2026-10-24.md)。
+0.8.4 增加可选女主演目录：目录名只来自本片演员中具备完整 ATTACKERS 官方“女優”证据的精确匹配；信息不足时要求手动选择，自动整理停止。预览与执行持续复核演员选择及子目录安全性，默认关闭。2026-10-23 隔离合成回归 `1552 passed, 7 subtests`、Vue 组件测试 `36/36`、dist build 均通过。随后两个真实样本均在无 ID、无人工选择时完成原生预览；当日未执行整理。2026-10-24 后续两部影片的原生整理验收通过，硬链接、源 SHA、NFO 和图像审计通过；原始部署截图、运行日志和审计收据由仓库外工作空间维护。规则见[女主演目录规格](.scratch/manko-actress-folders/spec.md)。
 
 0.8.3 使用官方 MoviePilot V3 SDK 的离线合成测试通过 `1544 tests` 和 `7 subtests`。2026-10-23 现场核验中，ADN-775 与 ADN-765 的 Manko 搜索各返回一个规范 ID；ADN-775 在未手填 ID 的原生手动预览中自动识别，且只执行一次。宿主状态确认文件整理完成，源与目标为同一 inode、源 SHA-256 不变；新增 NFO 的身份及标题、年份、简介、演员、导演、片商、时长字段齐全。poster (800×538) 与横向 fanart/backdrop (800×534) 均已生成；背景图与 poster 哈希不同，fanart 与 backdrop 哈希一致。此现场结果覆盖这两个查询样本及 ADN-775 单次整理，不代表真实 qB 新下载自动流程已验收。
 
@@ -193,7 +193,7 @@ XML 使用库转义并去除非法字符。图片 URL 限批准 HTTPS 主机，�
 
 ### 部署后核验
 
-2026-10-23 0.8.4 女主演目录现场核验：部署清单为 57 个运行文件；core6/public1167、apply 时配置和三个 ledger 均不变，binding revision 为 9。随后配置恢复通过单次 PUT 200，仅启用 `actress_subfolder`；自动流程关闭、queue 为 0。页面开关已核验为勾选（截图见 [`outputs/manko-actress-layout-20261023/ui-actress-enabled.png`](../outputs/manko-actress-layout-20261023/ui-actress-enabled.png)），默认目标仍为 `/media/Link/电影`，AV 目标由用户自由选择。ADN-765/775 均在无 ID、无人工选角时成功返回各自女主演目录下的预期 native preview 目标。审计确认 manifest/source 匹配、手动 ledger integrity OK、handoff/auto ledger 不变、源 stat 与 nlink=2 保持，既有平铺目录、sidecars 和 AV root 不变。**本次现场没有执行新的整理或迁移，也没有创建 NAS 新目录**；因此只有部署和预览证据，没有真实执行的硬链接、改名或刮削落盘证据。
+2026-10-23 0.8.4 现场部署核验：部署清单 57 个运行文件；core/public、配置、三个 ledger 和 binding revision 保持。随后配置恢复仅启用 `actress_subfolder`，自动流程关闭、queue 为 0。两个样本均在无原生 ID、无人工选角时返回预期女主演目录预览；审计确认 manifest/source 匹配、ledger 完整性及源 stat/nlink 保持。**当日未执行新的整理或迁移，也未创建新目录**；证据仅覆盖部署与预览，不证明硬链接、改名或刮削落盘完成。原始部署截图、运行日志和审计收据由仓库外工作空间维护。
 
 部署时保留现有仓库绑定、配置和插件数据。2026-10-23 的 0.8.3 部署核对了插件版本及仓库绑定，core6/public1167、配置和 automatic mode 均保持不变；manual ledger 更新且完整性检查通过，handoff/auto ledger 未变。ADN-775 的原生无 ID 预览、单次执行、宿主状态回读和五个目标文件审计均通过；源哈希、大小、mtime 保持不变，源与目标 inode 相同。ADN-765 本轮仅重新核验了搜索计数及规范 ID；此前整理和刮削验收见上述专题记录。真实 qB 新下载自动流程仍未验收，具体主机和安装状态由环境记录维护。原生旧整理窗口空 ID 自动识别仍依赖对应 MoviePilot 热修。多 ID 的稳定选择只适用于完整元数据与演员集合相同且标题/简介译文无冲突的候选组；真实差异仍保留歧义。
 
@@ -208,6 +208,10 @@ cd /absolute/path/to/MoviePilot-Plugins
 测试使用官方引导、临时 CONFIG_DIR、真实 SDK/模型/SQLite和合成 HTTP/执行回放，收集及执行阶段禁止真实 DNS/socket。未访问真实媒体站点、图片、付费模型、实际下载器或 NAS，未启动生产应用生命周期。没有 GitHub Actions、凭据、宿主改动。
 
 GPL-3.0，完整文本见 [LICENSE](LICENSE)，来源说明见 [NOTICE](NOTICE)。沿用 [hyuan280/JAVRecognize 1.1](https://github.com/hyuan280/MoviePilot-Plugins/tree/main/plugins.v2/javrecognize) 的独立来源/原生整理思路；Manko 编码合同保留原作者署名，其余适配器依据公开协议事实独立编写，未复制 MetaTube 实现。
+
+## 开发与发布边界
+
+本仓库跟踪源码、测试、规格和运行发布文件（包括 `plugins.v3/**/dist`）。可重建依赖与工具缓存、本地实例配置及工作区运维产物不应提交；现有 `.scratch/` 规格与 Issue 上下文保留在仓库中。原始部署截图、运行日志和审计收据由仓库外工作空间维护。Web 临时构建输出按 `web/.gitignore` 管理；根 `.gitignore` 不忽略通用 `dist/`，以保留运行发布文件。
 
 ## 工程技能配置
 
